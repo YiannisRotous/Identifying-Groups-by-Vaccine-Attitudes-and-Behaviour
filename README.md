@@ -15,12 +15,12 @@ For more information, please visit the [ADPH London official website](https://ww
 
 The statistical analysis for the separate regression models for each question and statement, is contained in the R Markdown file:
 
-* **[separate_regressions_wave1.Rmd](./separate_regressions_wave1.Rmd)**: This R Markdown script contains the code for the separate regression analysis of the survey questions and statements.
-* **[preprocess_survey_wave.R](./preprocess_survey_wave.R)**: This script is used to clean and preprocess the raw survey data, bringing it into the required format for statistical modeling.
+* **[separate_regressions_wave1.Rmd](./R_scripts/separate_regressions_wave1.Rmd)**: This R Markdown script contains the code for the separate regression analysis of the survey questions and statements.
+* **[preprocess_survey_wave.R](./R_scripts/preprocess_survey_wave.R)**: This script is used to clean and preprocess the raw survey data, bringing it into the required format for statistical modeling.
 
 For the joint Bayesian Nonparametric latent class analysis, we utilized a Stan-based workflow:
 
-* **[BNP_LCA_analysis.R](./BNP_LCA_analysis.R)**: The main R script used to execute the analysis.
-* **[lca.stan](./lca.stan)**: Contains the Stan code for the latent class analysis model.
-* **[two_step_mult.stan](./two_step_mult.stan)**: Contains the Stan code for the two-step approach, where predicted classifications are regressed on individual-level covariates.
+* **[BNP_LCA_analysis.R](./R_scripts/BNP_LCA_analysis.R)**: The main R script used to execute the analysis.
+* **[lca.stan](./Stan_scripts/lca.stan)**: Contains the Stan code for the latent class analysis model.
+* **[two_step_mult.stan](./Stan_scripts/two_step_mult.stan)**: Contains the Stan code for the two-step approach, where predicted classifications are regressed on individual-level covariates.
   
