@@ -15,4 +15,5 @@ For more information, please visit the [ADPH London official website](https://ww
 
 The statistical analysis for the separate regression models for each question and statement, is contained in the R Markdown file:
 
-./X.Rmd: This script includes the data preprocessing, regression analysis, and results generation for the campaign survey questions.
+* **[separate_regressions_wave1.Rmd](./separate_regressions_wave1.Rmd)**: This R Markdown script contains the code for the separate regression analysis of the survey questions and statements.
+  
