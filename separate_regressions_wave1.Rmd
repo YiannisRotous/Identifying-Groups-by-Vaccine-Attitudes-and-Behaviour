@@ -1,0 +1,3112 @@
+---
+output:
+  html_document: default
+  pdf_document: default
+editor_options: 
+  chunk_output_type: console
+---
+
+<!-- ioslides_presentation: default -->
+
+# WWGV survey regression analysis (first wave)
+
+This document investigates the effect of covariates on the responses given in the Camden vaccine survey using generalised linear regression. This aims to answer questions such as
+
+> is a person more likely to have positive views about vaccinations if their demographics are $X$ and $Y$, where as those with $A$ and $B$ demographics are more likely to have negative views about vaccinations?
+
+Ultimately, we want to be able to see if the data helps us do the following:
+
+-   understand the differences in responses for different types of people which might help develop approaches to reach those people differently or focus particular messaging
+-   e.g. white middle aged men don’t typically see campaigns, but get their information mostly from radio
+-   and how we need to shape that messaging
+-   e.g. Bangladeshi young women are worried about $X$ and $Y$, but not $A$
+
+A lot of vaccination data is done by region (e.g. south east London) / borough or IMD and ethnicity so we can use those as the base categories that the data is split by.
+
+We have taken binary valued outcomes from the survey and used with logistic regression.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r load-libraries, message=FALSE, warning=FALSE}
+library(readr)
+library(dplyr)
+library(forcats)
+library(effects)
+library(ggeffects)
+library(ggplot2)
+library(sjPlot)
+library(dotwhisker)
+library(broom)
+library(knitr)
+library(kableExtra)
+library(tidyr)
+library(vaccineanalysis)
+```
+
+```{r select-questions-eval}
+# which outcomes to include in analysis
+eval_concerned      <- TRUE
+eval_vacc_important <- TRUE
+eval_vacc_eff       <- TRUE
+eval_vacc_last_yr   <- FALSE
+eval_vacc_next_yr   <- FALSE
+eval_campaign_hear  <- FALSE
+eval_mmr_doses      <- FALSE
+```
+
+## Data cleaning
+
+The data are formatted with possible survey response as column headings and either selected or empty. We need to combine these columns in to a single covariate column.
+We also clean and shorten text and convert to factors.
+
+```{r load-data, message=FALSE, warning=FALSE}
+vaccine_survey_raw <- readxl::read_xlsx(
+  here::here("../data/SAV for LBON (Vaccine survey) 31 4.7.2025 - LABEL.xlsx"), sheet = "single-header")
+```
+
+```{r data-clean, message=FALSE, warning=FALSE}
+data <- 
+  process_survey_wave(
+    survey_data = vaccine_survey_raw,
+    output_path = here::here("../data_clean_wave1.RData")
+  )
+```
+
+# Empirical analysis
+
+This is equivalent to the data slice Excel workbook provided with the data. We create histograms of the raw data for each outcome question.
+
+## Vaccinated last year
+
+```{r vacc_last_yr-histograms, message=FALSE, warning=FALSE, fig.height=10, fig.path="figures/", dev="png"}
+dat_last_yr <- data |>
+  dplyr::select(vacc_last_yr, Age, Gender, 'social_grade', 'ethnicity_grp', 'marital_status', 'working_status',
+                'children_in_household', 'parent_guardian', 'house_tenure',
+                weight) |> 
+  dplyr::filter(vacc_last_yr != "Don't know/ can't recall") |> 
+  dplyr::mutate(vacc_last_yr = fct_drop(vacc_last_yr),
+                vacc_last_yr = as.numeric(vacc_last_yr) - 1)
+
+last_yr_aggregate <- dat_last_yr |> 
+  tidyr::pivot_longer(cols = c(-vacc_last_yr, -weight), 
+                      names_to = "predictor",
+                      values_to = "predictor_level") |> 
+  dplyr::group_by(predictor, predictor_level) |> 
+  dplyr::summarise(
+    vaccination_rate = weighted.mean(vacc_last_yr, w = weight, na.rm = TRUE),
+    sample_size = n(),
+    weighted_pop = sum(weight, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# plot
+
+ggplot(last_yr_aggregate, aes(x = predictor_level, y = vaccination_rate, fill = predictor_level)) +
+  geom_col() +  # for pre-summarised data
+  geom_text(aes(label = paste0(round(vaccination_rate * 100), "%")), vjust = -0.5) +
+  facet_wrap(~ predictor, scales = "free_x") +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+## Vaccinated next year
+
+```{r vacc_next_yr-histograms, message=FALSE, warning=FALSE, fig.height=10, fig.path="figures/", dev="png"}
+dat_next_yr <- data |>
+  dplyr::select(vacc_next_yr, Age, Gender, 'social_grade', 'ethnicity_grp', 'marital_status', 'working_status',
+                'children_in_household', 'parent_guardian', 'house_tenure',
+                weight) |> 
+  dplyr::filter(vacc_next_yr != "Don't know/ unsure") %>%
+  dplyr::mutate(vacc_next_yr = case_when(
+    vacc_next_yr %in% c("Fairly likely", "Very likely") ~ 1,
+    vacc_next_yr %in% c("Not at all likely", "Not very likely") ~ 0
+  ))
+
+next_yr_aggregate <- dat_next_yr |> 
+  tidyr::pivot_longer(cols = c(-vacc_next_yr, -weight), 
+                      names_to = "predictor",
+                      values_to = "predictor_level") |> 
+  dplyr::group_by(predictor, predictor_level) |> 
+  dplyr::summarise(
+    vaccination_rate = weighted.mean(vacc_next_yr, w = weight, na.rm = TRUE),
+    sample_size = n(),
+    weighted_pop = sum(weight, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# plot
+
+ggplot(next_yr_aggregate, aes(x = predictor_level, y = vaccination_rate, fill = predictor_level)) +
+  geom_col() +  # for pre-summarised data
+  geom_text(aes(label = paste0(round(vaccination_rate * 100), "%")), vjust = -0.5) +
+  facet_wrap(~ predictor, scales = "free_x") +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+
+## MMR doses
+
+```{r mmr_doses-histograms, message=FALSE, warning=FALSE, fig.height=10, fig.path="figures/", dev="png"}
+dat_mmr <- data |>
+  dplyr::select(mmr_doses, Age, Gender, 'social_grade', 'ethnicity_grp', 'marital_status', 'working_status',
+                'children_in_household', 'parent_guardian', 'house_tenure',
+                weight) |> 
+  dplyr::filter(mmr_doses %in% 
+                  c("Yes, I have", "No, I haven't")) |>
+  dplyr::mutate(mmr_doses = fct_drop(mmr_doses),
+                mmr_doses = as.numeric(mmr_doses) - 1)
+
+mmr_aggregate <- dat_mmr |> 
+  tidyr::pivot_longer(cols = c(-mmr_doses, -weight), 
+                      names_to = "predictor",
+                      values_to = "predictor_level") |> 
+  dplyr::group_by(predictor, predictor_level) |> 
+  dplyr::summarise(
+    p_mmr_doses = weighted.mean(mmr_doses, w = weight, na.rm = TRUE),
+    sample_size = n(),
+    weighted_pop = sum(weight, na.rm = TRUE),
+    .groups = "drop"
+  )
+  
+# plot
+
+ggplot(mmr_aggregate, aes(x = predictor_level, y = p_mmr_doses, fill = predictor_level)) +
+  geom_col() +  # for pre-summarised data
+  geom_text(aes(label = paste0(round(p_mmr_doses * 100), "%")), vjust = -0.5) +
+  facet_wrap(~ predictor, scales = "free_x") +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+## Vaccine effective
+
+```{r vacc_eff-histograms, message=FALSE, warning=FALSE, fig.height=10, fig.path="figures/", dev="png"}
+dat_vacc_eff <- data |>
+  dplyr::select(vacc_eff, Age, Gender, 'social_grade', 'ethnicity_grp', 'marital_status', 'working_status',
+                'children_in_household', 'parent_guardian', 'house_tenure',
+                weight) |> 
+  dplyr::filter(vacc_eff != "Neither agree nor disagree") |>
+  dplyr::mutate(vacc_eff = case_when(
+    vacc_eff %in% c("Strongly agree", "Tend to agree") ~ 1,
+    vacc_eff %in% c("Strongly disagree", "Tend to disagree") ~ 0
+  ))
+
+vacc_eff_aggregate <- dat_vacc_eff |> 
+  tidyr::pivot_longer(cols = c(-vacc_eff, -weight), 
+                      names_to = "predictor",
+                      values_to = "predictor_level") |> 
+  dplyr::group_by(predictor, predictor_level) |> 
+  dplyr::summarise(
+    p_vacc_eff = weighted.mean(vacc_eff, w = weight, na.rm = TRUE),
+    sample_size = n(),
+    weighted_pop = sum(weight, na.rm = TRUE),
+    .groups = "drop"
+  )
+  
+# plot
+
+ggplot(vacc_eff_aggregate, aes(x = predictor_level, y = p_vacc_eff, fill = predictor_level)) +
+  geom_col() +  # for pre-summarised data
+  geom_text(aes(label = paste0(round(p_vacc_eff * 100), "%")), vjust = -0.5) +
+  facet_wrap(~ predictor, scales = "free_x") +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+## Concerned about negative side effects
+
+```{r concerned-histograms, message=FALSE, warning=FALSE, fig.height=10, fig.path="figures/", dev="png"}
+dat_concerned <- data |>
+  dplyr::select(concerned, Age, Gender, 'social_grade', 'ethnicity_grp', 'marital_status', 'working_status',
+                'children_in_household', 'parent_guardian', 'house_tenure',
+                weight) |> 
+  dplyr::filter(concerned != "Neither agree nor disagree") |>
+  dplyr::mutate(concerned = case_when(
+    concerned %in% c("Strongly agree", "Tend to agree") ~ 1,
+    concerned %in% c("Strongly disagree", "Tend to disagree") ~ 0
+  ))
+
+concern_aggregate <- dat_concerned |> 
+  tidyr::pivot_longer(cols = c(-concerned, -weight), 
+                      names_to = "predictor",
+                      values_to = "predictor_level") |> 
+  dplyr::group_by(predictor, predictor_level) |> 
+  dplyr::summarise(
+    p_concerned = weighted.mean(concerned, w = weight, na.rm = TRUE),
+    sample_size = n(),
+    weighted_pop = sum(weight, na.rm = TRUE),
+    .groups = "drop"
+  )
+  
+# plot
+
+ggplot(concern_aggregate, aes(x = predictor_level, y = p_concerned, fill = predictor_level)) +
+  geom_col() +  # for pre-summarised data
+  geom_text(aes(label = paste0(round(p_concerned * 100), "%")), vjust = -0.5) +
+  facet_wrap(~ predictor, scales = "free_x") +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+## Vaccines important
+
+```{r vacc_imp-histograms, message=FALSE, warning=FALSE, fig.height=10, fig.path="figures/", dev="png"}
+dat_vacc_imp <- data |>
+  dplyr::select(vacc_important, Age, Gender, 'social_grade', 'ethnicity_grp', 'marital_status', 'working_status',
+                'children_in_household', 
+                'parent_guardian18',  # 'parent_guardian',
+                'house_tenure',
+                weight) |> 
+  dplyr::filter(vacc_important != "Neither agree nor disagree") |>
+  dplyr::mutate(vacc_important = case_when(
+    vacc_important %in% c("Strongly agree", "Tend to agree") ~ 1,
+    vacc_important %in% c("Strongly disagree", "Tend to disagree") ~ 0
+  ))
+
+vacc_imp_aggregate <- dat_vacc_imp |> 
+  tidyr::pivot_longer(cols = c(-vacc_important, -weight), 
+                      names_to = "predictor",
+                      values_to = "predictor_level") |> 
+  dplyr::group_by(predictor, predictor_level) |> 
+  dplyr::summarise(
+    p_vacc_important = weighted.mean(vacc_important, w = weight, na.rm = TRUE),
+    sample_size = n(),
+    weighted_pop = sum(weight, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# plot
+
+ggplot(vacc_imp_aggregate, aes(x = predictor_level, y = p_vacc_important, fill = predictor_level)) +
+  geom_col() +  # for pre-summarised data
+  geom_text(aes(label = paste0(round(p_vacc_important * 100), "%")), vjust = -0.5) +
+  facet_wrap(~ predictor, scales = "free_x") +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+## Heard (positive) about campaign
+
+```{r campaign_hear-histograms, message=FALSE, warning=FALSE, fig.height=10, fig.path="figures/", dev="png"}
+# remove heard negative and then did they hear anything?
+dat_hear <- data |>
+  dplyr::mutate(campaign_hear = ifelse(is.na(`Not applicable - I've not heard anything about any of these campaigns`), 1, 0)) |> 
+  dplyr::filter(!negative_hear %in% c("y", "selected")) |> 
+  dplyr::select(campaign_hear, Age, Gender, 'social_grade', 'ethnicity_grp', 'marital_status', 'working_status',
+                'children_in_household', 'parent_guardian', 'house_tenure',
+                weight)
+
+hear_aggregate <- dat_hear |> 
+  tidyr::pivot_longer(cols = c(-campaign_hear, -weight), 
+                      names_to = "predictor",
+                      values_to = "predictor_level") |> 
+  dplyr::group_by(predictor, predictor_level) |> 
+  dplyr::summarise(
+    p_campaign_hear = mean(campaign_hear, na.rm = TRUE),
+    p_campaign_hear = weighted.mean(campaign_hear, w = weight, na.rm = TRUE),
+    sample_size = n(),
+    weighted_pop = sum(weight, na.rm = TRUE),
+    .groups = "drop"
+  )
+  
+# plot
+
+ggplot(hear_aggregate, aes(x = predictor_level, y = p_campaign_hear, fill = predictor_level)) +
+  geom_col() +  # for pre-summarised data
+  geom_text(aes(label = paste0(round(p_campaign_hear * 100), "%")), vjust = -0.5) +
+  facet_wrap(~ predictor, scales = "free_x") +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+```{r save-sep-outcome-data, message=FALSE, warning=FALSE}
+save(dat_last_yr, dat_next_yr, dat_mmr, dat_vacc_eff, dat_concerned, dat_vacc_imp, dat_hear,
+     file = here::here("data/separate_outcome_data.RData"))
+```
+
+
+## Pairs comparison
+
+A pairs scatter plot gives an idea of the relationship between pairs of outcomes.
+
+```{r pairs-scatterplot-wave1, message=FALSE, warning=FALSE, eval=FALSE}
+#
+mmr_aggregate_dummy <- 
+  rbind.data.frame(mmr_aggregate,
+      list("parent_guardian", "Not parent/ guardian", 0, 0))
+
+data.frame(last_yr_aggregate$vaccination_rate, 
+           next_yr_aggregate$vaccination_rate, 
+           concern_aggregate$p_concerned,
+           hear_aggregate$p_campaign_hear,
+           vacc_imp_aggregate$p_vacc_important,
+           mmr_aggregate_dummy$p_mmr_doses) |> 
+  GGally::ggpairs(columnLabels = c("Last year", "Next year", "Concerned", "Campaign hear", "Vacc important", "MMR doses"),
+    lower = list(continuous = GGally::wrap("smooth", method = "lm", se = FALSE))
+  )
+
+ggsave(filename = "figures/pair-scatterplot.png")
+```
+
+# Regression analysis
+
+Next we fit separate logistic regressions for each outcome question.
+The covariates used are
+
+1.  Age group
+2.  Gender
+3.  Social grade
+4.  Ethnicity group
+5.  Marital status
+6.  Working status
+7.  Number of children in household
+8.  Parent or guardian dependency age group
+9.  House tenure
+
+## Vaccinated last year
+
+```{r}
+library(brms)
+library(purrr)
+library(marginaleffects)
+library(forcats)
+
+dat_last_yr$house_tenure <- fct_collapse(dat_last_yr$house_tenure,
+  "Own" = c("Own outright", "Own with a mortgage", "Shared ownership scheme"),
+  "Missing" = "blank"
+)
+levels(dat_last_yr$marital_status)[levels(dat_last_yr$marital_status) == "blank"] <- "Missing"
+library(rstanarm)
+fit_rstanarm <- rstanarm::stan_glm(
+  vacc_last_yr ~ Age + Gender + social_grade + ethnicity_grp +
+    marital_status + house_tenure + working_status +
+    parent_guardian + children_in_household,
+  
+  data = dat_last_yr,#dat_last_yr_clean,
+  family = binomial(link = "logit"),
+  
+  weights = weight,
+  
+  # prior = normal(location = 0, scale = 100, autoscale = FALSE),
+  # prior_intercept = normal(location = 0, scale = 100, autoscale = FALSE),
+  
+  chains = 4,
+  iter = 2000
+)
+#comparison of the observed with posterior predictive vac proportion
+library(bayesplot)
+y_rep <- posterior_predict(fit_rstanarm)
+ppc_stat(y = dat_last_yr$vacc_last_yr, yrep = y_rep[1:4000, ], stat = "mean")
+
+
+predictors <- c("Age", "Gender", "social_grade", "ethnicity_grp", 
+                "marital_status", "house_tenure", "working_status", 
+                "parent_guardian", "children_in_household")
+
+eff_df_bayesian <- map_dfr(predictors, function(p) {
+  
+  # 1. Create the grid for this specific predictor
+  nd <- dat_last_yr %>%
+    modelr::data_grid(!!sym(p), .model = dat_last_yr)
+  
+  
+  # 2. Get the draws on the probability scale
+  post_probs <- posterior_epred(fit_rstanarm, newdata = nd, re_formula = NULL)
+  
+  # 3. Calculate the proportion of draws >= 0.5 for each level
+  # colMeans on a logical comparison gives the probability (0 to 1)
+  p_gt_50 <- colMeans(post_probs >= 0.5)
+  lower_vals <- apply(post_probs, 2, quantile, probs = 0.025)
+  upper_vals <- apply(post_probs, 2, quantile, probs = 0.975)
+  # 4. Summary statistics
+  nd %>%
+    mutate(
+      predictor = p,
+      predictor_level = as.character(!!sym(p)),
+      fit = colMeans(post_probs),
+      lower = apply(post_probs, 2, quantile, probs = 0.025),
+      upper = apply(post_probs, 2, quantile, probs = 0.975),
+      # New column: 1 if more than half the posterior mass is >= 0.5, else 0
+      # Or simply keep it as a continuous probability if you prefer
+      #above_50_threshold = ifelse(p_gt_50 >= 0.5, 1, 0) 
+      above_50_threshold = case_when(
+        p_gt_50 < 0.5                       ~ 0,
+        p_gt_50 >= 0.5 & lower_vals <= 0.5  ~ 1,
+        p_gt_50 >= 0.5 & lower_vals > 0.5   ~ 2
+      )
+    ) %>%
+    select(predictor, predictor_level, fit, lower, upper, above_50_threshold)
+})
+
+eff_df_bayesian <- eff_df_bayesian %>%
+  mutate(threshold_group = case_when(
+    above_50_threshold == 2 ~ "Above C.I. no overlap 50%",
+    above_50_threshold == 1 ~ "Above C.I. overlap 50%",
+    above_50_threshold == 0 ~ "Below C.I. overlap 50%"
+  ))
+
+
+# 1. Update your nice_names to include line breaks for the long ones
+nice_names <- c(
+  "Age" = "Age",
+  "children_in_household" = "Children\nin Household",
+  "ethnicity_grp" = "Ethnicity",
+  "Gender" = "Gender",
+  "house_tenure" = "Housing",
+  "marital_status" = "Marital\nStatus",
+  "parent_guardian" = "Parental\nStatus",
+  "social_grade" = "Social\nGrade",
+  "working_status" = "Work\nStatus"
+)
+
+# 2. Run the plot with the labeller
+ggplot(eff_df_bayesian, aes(x = predictor_level, y = fit, color = threshold_group)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "blue", linewidth = 0.8) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) +
+  
+  scale_color_manual(values = c("Above C.I. no overlap 50%" = "green", 
+                                "Above C.I. overlap 50%" = "grey", 
+                                "Below C.I. overlap 50%" = "red")) + 
+  
+  # Use the 'labeller' argument to map the raw names to your nice names
+  facet_grid(~ predictor, 
+             scales = "free_x", 
+             space = "free_x", 
+             labeller = as_labeller(nice_names)) + 
+  
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.background = element_blank(),           
+    strip.text = element_text(face = "bold", size = 11, lineheight = 0.9), 
+    panel.spacing = unit(0.5, "lines") # Increased slightly from 0 to avoid text overlap
+  ) +
+  labs(
+    y = "Probability vaccinated last year",
+    x = "Predictor Level",
+    color = "Probability Threshold",
+    title = "Posterior Predictive Probabilities"
+  )
+```
+
+
+```{r vacc_last_yr_table, message=FALSE, warning=FALSE}
+library(broom.mixed)
+broom.mixed::tidy(fit_rstanarm, conf.int = TRUE) |> 
+  kable(digits = 3, caption = "Logistic Regression Results") |> 
+  kable_styling(full_width = FALSE)
+
+
+library(rstanarm)
+library(broom.mixed)
+library(knitr)
+library(kableExtra)
+tab_latex <- broom.mixed::tidy(
+  fit_rstanarm,
+  conf.int = TRUE,
+  conf.level = 0.95,
+  conf.method = "quantile",
+  exponentiate = FALSE   # remove if you want log-odds
+)
+
+latex_table <- kable(
+  tab_latex,
+  format = "latex",
+  booktabs = TRUE,
+  digits = 3,
+  caption = "Bayesian Logistic Regression Results (Odds Ratios, 95\\% Credible Intervals)",
+  label = "tab:bayes_logit"
+)
+
+cat(latex_table)
+
+```
+
+```{r}
+
+plot_labels <- c(
+  "25-34",
+  "35-44",
+  "45-54", 
+  "≥55",
+  "Male",
+  "Low",
+  "Asian",
+  "Black",
+  "Mixed",
+  "Other",
+  "Prefer not to say",
+  "Living as married",
+  "Never Married",
+  "Separated/ Divorced",
+  "Widowed",
+  "Missing",
+  "Rent-free" = "house_tenureRent-free",
+  "Rent from a housing association",
+  "Rent from a private landlord",
+  "Rent from my local authority",
+  "Family/ friends but pay rent",
+  "Other",
+  "Missing",
+  "Working part-time",
+  "Full-time student",
+  "Not working/ Other",
+  "Retired",
+  "Unemployed",
+  "5 to 11 years",
+  "12 to 16 years",
+  "17 to 18 years",
+  "Over 18 years",
+  "Not parent/ guardian",
+  "1",
+  "2",
+  "≥3",
+  "Refused"
+)
+
+plot_labels <- c(
+  "Age (ref: 18-24)" = "header_age",
+  "   25-34" = "Age25-34",
+  "   35-44" = "Age35-44",
+  "   45-54" = "Age45-54",
+  "   ≥ 55" = "Age55+",
+  "Gender (ref: Female)" = "header_gender",
+  "   Male" = "GenderMale",
+  "Social Grade (ref: High)" = "header_social",
+  "   Low" = "social_gradeLow",
+  "Ethnicity (ref: White)" = "header_eth",
+  "   Asian" = "ethnicity_grpAsian",
+  "   Black" = "ethnicity_grpBlack",
+  "   Mixed" = "ethnicity_grpMixed",
+  "   Other" = "ethnicity_grpOther",
+  "   Prefer not to say" = "ethnicity_grpPrefer not to say",
+  "Marital Status (ref: Married/ Civil Partnership)" = "header_marital",
+  "   Living as married" = "marital_statusLiving as married",
+  "   Never Married" = "marital_statusNever Married",
+  "   Separated/ Divorced" = "marital_statusSeparated/ Divorced",
+  "   Widowed" = "marital_statusWidowed",
+  "   Missing" = "marital_statusMissing",
+  "Housing Tenure (ref: Own)" = "header_housing",
+  "   Rent-free" = "house_tenureRent-free",
+  "   Rent from a housing association" = "house_tenureRent from a housing association",
+  "   Rent from a private landlord" = "house_tenureRent from a private landlord",
+  "   Rent from my local authority" = "house_tenureRent from my local authority",
+  "   Family/ friends but pay rent" = "house_tenureFamily/ friends but pay rent",
+  "   Other" = "house_tenureOther",
+  "   Missing" = "house_tenureMissing",
+  "Working Status (ref: Working full time)" = "header_work",
+  "   Working part-time" = "working_statusWorking part time",
+  "   Full-time student" = "working_statusFull time student",
+  "   Not working/ Other" = "working_statusNot working/ Other",
+  "   Retired" = "working_statusRetired",
+  "   Unemployed" = "working_statusUnemployed",
+  "Parent/Guardian of Child Aged (ref: 4 years and under)" = "header_parent",
+  "   5 to 11 years" = "parent_guardian5 to 11 years",
+  "   12 to 16 years" = "parent_guardian12 to 16 years",
+  "   17 to 18 years" = "parent_guardian17 to 18 years",
+  "   Over 18 years" = "parent_guardianOver 18 years",
+  "   Not parent/ guardian" = "parent_guardianNot parent/ guardian",
+  "Number of Children in Household (ref: 0)" = "header_children",
+  "   1" = "children_in_household1",
+  "   2" = "children_in_household2",
+  "   ≥ 3" = "children_in_household3+",
+  "   Refused" = "children_in_householdRefused"
+)
+
+plot_labels_rev <- setNames(names(plot_labels), plot_labels)
+
+```
+
+```{r}
+
+
+library(tidyverse)
+library(broom.mixed)
+
+# 1. Tidy the model
+posterior_df <- tidy(fit_rstanarm, conf.int = TRUE, exponentiate = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(term = factor(term, levels = term)) %>%   # <-- LOCK ORDER
+  mutate(group = case_when(
+    str_detect(term, "Age") ~ "Age",
+    str_detect(term, "Gender") ~ "Gender",
+    str_detect(term, "social_grade") ~ "Social Grade",
+    str_detect(term, "ethnicity_grp") ~ "Ethnicity",
+    str_detect(term, "marital_status") ~ "Marital Status",
+    str_detect(term, "house_tenure") ~ "Housing Tenure",
+    str_detect(term, "working_status") ~ "Working Status",
+    str_detect(term, "parent_guardian") ~ "Parent/Guardian",
+    str_detect(term, "children_in_household") ~ "Number of Children in Household",
+    TRUE ~ "Other"
+  )) %>%
+  # 3. STRICTLY ORDER THE GROUPS
+  # We use fct_relevel to define the top-to-bottom order you requested
+  mutate(group = fct_relevel(group, 
+                             "Age", "Gender", "Social Grade", "Ethnicity", 
+                             "Marital Status", "Housing Tenure", "Working Status", 
+                             "Parent/Guardian", "Number of Children in Household")) %>%
+  # 4. ORDER THE ROWS WITHIN THE GROUPS
+  # We arrange by the group level, then by the estimate
+  # Create the factor levels for 'term' based on this specific sorted order
+  mutate(term = factor(term, levels = rev(unique(term)))) %>%
+  mutate(color = ifelse(estimate > 1, "Increase", "Decrease"))
+
+
+
+
+# 5. Forest plot
+ggplot(posterior_df, aes(x = term, y = estimate, color = color)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black") +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.3) +
+  geom_point(size = 3) +
+  coord_flip() +
+  scale_color_manual(values = c("Increase" = "blue", "Decrease" = "red")) +
+  labs(
+    x = "Predictors",
+    y = "Odds Ratio (95% Credible Interval)",
+    color = "Effect"
+  ) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank(),
+        legend.position = "none",
+        panel.border = element_blank(),
+    
+    # 2. Add back only the Left (Y) and Bottom (X) lines
+    axis.line = element_line(color = "black", linewidth = 0.5),
+    #     axis.text.y = element_text(size = 10),
+    # # Increase the size of the numbers on the bottom axis
+    # axis.text.x = element_text(size = 10),
+      aspect.ratio = 1.4,
+    axis.text.y = element_text(size = 10, color = "black"),
+    # Bold the Odds Ratio numbers (Bottom) - ONLY ONE INSTANCE HERE
+    axis.text.x = element_text(size = 10,  color = "black"),
+    axis.ticks = element_blank()        # Removes the little lines
+    # Bold the Axis Titles
+    # axis.title.x = element_text(face = "bold"),
+    # axis.title.y = element_text(face = "bold")
+ ) +
+  scale_x_discrete(
+  limits = rev(unname(plot_labels)),   # enforce full order including headers
+  labels = plot_labels_rev
+)
+
+# +
+#    scale_x_discrete(labels = c(plot_labels_rev
+#  ))
+```
+
+
+```{r}
+library(tidyverse)
+library(broom.mixed)
+
+# 1. Get the raw results from rstanarm
+# Changed 'prob' to 'conf.level'
+results <- tidy(fit_rstanarm, conf.int = TRUE, exponentiate = TRUE, conf.level = 0.95) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    # Approximate p-value from Z-score (Standard for academic tables)
+    p.value = 2 * (1 - pnorm(abs(estimate / std.error))), 
+    OR = sprintf("%.2f", estimate),
+    CI = sprintf("%.2f, %.2f", conf.low, conf.high),
+    P = case_when(
+      p.value < 0.001 ~ "<0.001",
+      p.value >= 0.99 ~ ">0.99",
+      TRUE ~ sprintf("%.3f", p.value)
+    )
+  )
+
+
+clean_table <- results %>%
+  mutate(group = case_when(
+    str_detect(term, "Age") ~ "Age (ref: 18-24)",
+    str_detect(term, "Gender") ~ "Gender (ref: Female)",
+    str_detect(term, "social_grade") ~ "Social Grade (ref: High)",
+    str_detect(term, "ethnicity_grp") ~ "Ethnicity (ref: White)",
+    str_detect(term, "marital_status") ~ "Marital Status (ref: Married/ Civil Partnership)",
+    str_detect(term, "house_tenure") ~ "Housing Tenure (ref: Own outright)",
+    str_detect(term, "working_status") ~ "Working Status (ref: Working full time)",
+    str_detect(term, "parent_guardian") ~ "Parent/Guardian of Child Aged (ref: 4 years and under)",
+    str_detect(term, "children_in_household") ~ "Children in Household (ref: 0)",
+    TRUE ~ "Other"
+  )) %>%
+  # This regex removes the variable name prefix to leave just the level name
+  mutate(level_name = str_remove(term, "Age|Gender|social_grade|ethnicity_grp|marital_status|house_tenure|working_status|parent_guardian|children_in_household"))
+
+group_order <- c("Age (ref: 18-24)", "Gender (ref: Female)", "Social Grade (ref: High)", 
+                 "Ethnicity (ref: White)", "Marital Status (ref: Married/ Civil Partnership)", 
+                 "Housing Tenure (ref: Own outright)", "Working Status (ref: Working full time)", 
+                 "Parent/Guardian of Child Aged (ref: 4 years and under)", "Children in Household (ref: 0)")
+
+cat("% Copy the lines below into your LaTeX tabular environment\n")
+for(g in group_order) {
+  # Print the Header Row
+  cat(paste0(g, " &  &  &  \\\\ \n"))
+  cat("\\addlinespace[2.5pt]\n") # Adds the space you had in your template
+  
+  # Filter and print the indented sub-rows
+  sub_grp <- clean_table %>% filter(group == g)
+  
+  if(nrow(sub_grp) > 0) {
+    for(i in 1:nrow(sub_grp)) {
+      # Use quadruple backslashes to result in two backslashes in the output
+      cat(paste0("\\;\\;\\;\\;", sub_grp$level_name[i], " & ", 
+                 sub_grp$OR[i], " & ", sub_grp$CI[i], " & ", sub_grp$P[i], " \\\\ \n"))
+    }
+  }
+}
+
+```
+
+
+## Vaccinated next year
+
+```{r vacc_next_yr-fits, fig.height=10, message=FALSE, warning=FALSE}
+# idc_to_rem = unique(c(which(dat_next_yr$children_in_household == "Refused"),
+# which(dat_next_yr$house_tenure == "blank"),
+# which(dat_next_yr$marital_status == "blank")))
+# dat_next_yr_clean = dat_next_yr[-idc_to_rem,]
+# dat_next_yr_clean = dat_next_yr[-idc_to_rem,]
+# dat_next_yr_clean$marital_status = fct_collapse(dat_next_yr_clean$marital_status, Widowed = c("Widowed", "blank"))
+# dat_next_yr_clean$house_tenure = fct_collapse(dat_next_yr_clean$house_tenure, Other = c("Other", "blank"))
+# dat_next_yr_clean$children_in_household = fct_collapse(dat_next_yr_clean$children_in_household, "3+" = c("3+", "Refused"))
+dat_next_yr$house_tenure <- fct_collapse(dat_next_yr$house_tenure,
+  "Own" = c("Own outright", "Own with a mortgage", "Shared ownership scheme"),
+  "Missing" = "blank"
+)
+levels(dat_next_yr$marital_status)[levels(dat_next_yr$marital_status) == "blank"] <- "Missing"
+
+fit_rstanarm <- rstanarm::stan_glm(
+  vacc_next_yr ~ Age + Gender + social_grade + ethnicity_grp +
+    marital_status + house_tenure + working_status +
+    parent_guardian + children_in_household,
+  
+  data = dat_next_yr,
+  family = binomial(link = "logit"),
+  
+  weights = weight,
+  
+  # prior = normal(location = 0, scale = 100, autoscale = FALSE),
+  # prior_intercept = normal(location = 0, scale = 100, autoscale = FALSE),
+  
+  chains = 4,
+  iter = 2000,
+  seed = 123
+)
+
+y_rep <- posterior_predict(fit_rstanarm)
+ppc_stat(y = dat_next_yr$vacc_next_yr, yrep = y_rep[1:4000, ], stat = "mean")
+
+
+predictors <- c("Age", "Gender", "social_grade", "ethnicity_grp", 
+                "marital_status", "house_tenure", "working_status", 
+                "parent_guardian", "children_in_household")
+
+eff_df_bayesian <- map_dfr(predictors, function(p) {
+  
+  # 1. Create the grid for this specific predictor
+  nd <- dat_next_yr %>%
+    modelr::data_grid(!!sym(p), .model = dat_next_yr)
+  
+  
+  # 2. Get the draws on the probability scale
+  post_probs <- posterior_epred(fit_rstanarm, newdata = nd, re_formula = NULL)
+  
+  # 3. Calculate the proportion of draws >= 0.5 for each level
+  # colMeans on a logical comparison gives the probability (0 to 1)
+  p_gt_50 <- colMeans(post_probs >= 0.5)
+  lower_vals <- apply(post_probs, 2, quantile, probs = 0.025)
+  upper_vals <- apply(post_probs, 2, quantile, probs = 0.975)
+  # 4. Summary statistics
+  nd %>%
+    mutate(
+      predictor = p,
+      predictor_level = as.character(!!sym(p)),
+      fit = colMeans(post_probs),
+      lower = apply(post_probs, 2, quantile, probs = 0.025),
+      upper = apply(post_probs, 2, quantile, probs = 0.975),
+      # New column: 1 if more than half the posterior mass is >= 0.5, else 0
+      # Or simply keep it as a continuous probability if you prefer
+      #above_50_threshold = ifelse(p_gt_50 >= 0.5, 1, 0) 
+      above_50_threshold = case_when(
+        p_gt_50 < 0.5                       ~ 0,
+        p_gt_50 >= 0.5 & lower_vals <= 0.5  ~ 1,
+        p_gt_50 >= 0.5 & lower_vals > 0.5   ~ 2
+      )
+    ) %>%
+    select(predictor, predictor_level, fit, lower, upper, above_50_threshold)
+})
+
+eff_df_bayesian <- eff_df_bayesian %>%
+  mutate(threshold_group = case_when(
+    above_50_threshold == 2 ~ "Above C.I. no overlap 50%",
+    above_50_threshold == 1 ~ "Above C.I. overlap 50%",
+    above_50_threshold == 0 ~ "Below C.I. overlap 50%"
+  ))
+
+
+# 1. Update your nice_names to include line breaks for the long ones
+nice_names <- c(
+  "Age" = "Age",
+  "children_in_household" = "Children\nin Household",
+  "ethnicity_grp" = "Ethnicity",
+  "Gender" = "Gender",
+  "house_tenure" = "Housing",
+  "marital_status" = "Marital\nStatus",
+  "parent_guardian" = "Parental\nStatus",
+  "social_grade" = "Social\nGrade",
+  "working_status" = "Work\nStatus"
+)
+
+# 2. Run the plot with the labeller
+ggplot(eff_df_bayesian, aes(x = predictor_level, y = fit, color = threshold_group)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "blue", linewidth = 0.8) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) +
+  
+  scale_color_manual(values = c("Above C.I. no overlap 50%" = "green", 
+                                "Above C.I. overlap 50%" = "grey", 
+                                "Below C.I. overlap 50%" = "red")) + 
+  
+  # Use the 'labeller' argument to map the raw names to your nice names
+  facet_grid(~ predictor, 
+             scales = "free_x", 
+             space = "free_x", 
+             labeller = as_labeller(nice_names)) + 
+  
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.background = element_blank(),           
+    strip.text = element_text(face = "bold", size = 11, lineheight = 0.9), 
+    panel.spacing = unit(0.5, "lines") # Increased slightly from 0 to avoid text overlap
+  ) +
+  labs(
+    y = "Probability vaccinated next year",
+    x = "Predictor Level",
+    color = "Probability Threshold",
+    title = "Posterior Predictive Probabilities"
+  )
+```
+
+```{r vacc_next_yr_table, message=FALSE, warning=FALSE}
+broom::tidy(fit_rstanarm, conf.int = TRUE) |> 
+  kable(digits = 3, caption = "Logistic Regression Results") %>%
+  kable_styling(full_width = FALSE)
+
+
+
+library(rstanarm)
+library(broom.mixed)
+library(knitr)
+library(kableExtra)
+tab_latex <- broom.mixed::tidy(
+  fit_rstanarm,
+  conf.int = TRUE,
+  conf.level = 0.95,
+  conf.method = "quantile",
+  exponentiate = FALSE   # remove if you want log-odds
+)
+
+tab_latex <- broom::tidy(
+  fit_rstanarm,
+  conf.int = TRUE,
+  # conf.level = 0.95,
+  # conf.method = "quantile",
+  exponentiate = FALSE   # remove if you want log-odds
+)
+
+
+latex_table <- kable(
+  tab_latex,
+  format = "latex",
+  booktabs = TRUE,
+  digits = 3,
+  caption = "Bayesian Logistic Regression Results (Odds Ratios, 95\\% Credible Intervals)",
+  label = "tab:bayes_logit"
+)
+
+cat(latex_table)
+
+```
+
+
+```{r}
+
+plot_labels <- c(
+  "25-34",
+  "35-44",
+  "45-54", 
+  "≥55",
+  "Male",
+  "Low",
+  "Asian",
+  "Black",
+  "Mixed",
+  "Other",
+  "Prefer not to say",
+  "Living as married",
+  "Never Married",
+  "Separated/ Divorced",
+  "Widowed",
+  "Missing",
+  "Rent-free" = "house_tenureRent-free",
+  "Rent from a housing association",
+  "Rent from a private landlord",
+  "Rent from my local authority",
+  "Family/ friends but pay rent",
+  "Other",
+  "Missing",
+  "Working part-time",
+  "Full-time student",
+  "Not working/ Other",
+  "Retired",
+  "Unemployed",
+  "5 to 11 years",
+  "12 to 16 years",
+  "17 to 18 years",
+  "Over 18 years",
+  "Not parent/ guardian",
+  "1",
+  "2",
+  "≥3",
+  "Refused"
+)
+
+plot_labels <- c(
+  "Age (ref: 18-24)" = "header_age",
+  "   25-34" = "Age25-34",
+  "   35-44" = "Age35-44",
+  "   45-54" = "Age45-54",
+  "   ≥ 55" = "Age55+",
+  "Gender (ref: Female)" = "header_gender",
+  "   Male" = "GenderMale",
+  "Social Grade (ref: High)" = "header_social",
+  "   Low" = "social_gradeLow",
+  "Ethnicity (ref: White)" = "header_eth",
+  "   Asian" = "ethnicity_grpAsian",
+  "   Black" = "ethnicity_grpBlack",
+  "   Mixed" = "ethnicity_grpMixed",
+  "   Other" = "ethnicity_grpOther",
+  "   Prefer not to say" = "ethnicity_grpPrefer not to say",
+  "Marital Status (ref: Married/ Civil Partnership)" = "header_marital",
+  "   Living as married" = "marital_statusLiving as married",
+  "   Never Married" = "marital_statusNever Married",
+  "   Separated/ Divorced" = "marital_statusSeparated/ Divorced",
+  "   Widowed" = "marital_statusWidowed",
+  "   Missing" = "marital_statusMissing",
+  "Housing Tenure (ref: Own)" = "header_housing",
+  "   Rent-free" = "house_tenureRent-free",
+  "   Rent from a housing association" = "house_tenureRent from a housing association",
+  "   Rent from a private landlord" = "house_tenureRent from a private landlord",
+  "   Rent from my local authority" = "house_tenureRent from my local authority",
+  "   Family/ friends but pay rent" = "house_tenureFamily/ friends but pay rent",
+  "   Other" = "house_tenureOther",
+  "   Missing" = "house_tenureMissing",
+  "Working Status (ref: Working full-time)" = "header_work",
+  "   Working part-time" = "working_statusWorking part time",
+  "   Full-time student" = "working_statusFull time student",
+  "   Not working/ Other" = "working_statusNot working/ Other",
+  "   Retired" = "working_statusRetired",
+  "   Unemployed" = "working_statusUnemployed",
+  "Parent/Guardian of Child Aged (ref: 4 years and under)" = "header_parent",
+  "   5 to 11 years" = "parent_guardian5 to 11 years",
+  "   12 to 16 years" = "parent_guardian12 to 16 years",
+  "   17 to 18 years" = "parent_guardian17 to 18 years",
+  "   Over 18 years" = "parent_guardianOver 18 years",
+  "   Not parent/ guardian" = "parent_guardianNot parent/ guardian",
+  "Number of Children in Household (ref: 0)" = "header_children",
+  "   1" = "children_in_household1",
+  "   2" = "children_in_household2",
+  "   ≥ 3" = "children_in_household3+",
+  "   Refused" = "children_in_householdRefused"
+)
+
+plot_labels_rev <- setNames(names(plot_labels), plot_labels)
+
+```
+
+
+```{r}
+library(tidyverse)
+library(broom.mixed)
+
+# 1. Process data with manual ordering
+posterior_df <- tidy(fit_rstanarm, conf.int = TRUE, exponentiate = TRUE) %>%
+  select(term, estimate, conf.low, conf.high) %>%
+  filter(term != "(Intercept)") %>%
+  
+  # Create groups to define the order you requested
+  mutate(group = case_when(
+    str_detect(term, "Age") ~ 1,
+    str_detect(term, "Gender") ~ 2,
+    str_detect(term, "social_grade") ~ 3,
+    str_detect(term, "ethnicity_grp") ~ 4,
+    str_detect(term, "marital_status") ~ 5,
+    str_detect(term, "house_tenure") ~ 6,
+    str_detect(term, "working_status") ~ 7,
+    str_detect(term, "parent_guardian") ~ 8,
+    str_detect(term, "children_in_household") ~ 9,
+    TRUE ~ 10
+  )) %>%
+  # Arrange by group first, then by the specific term
+  arrange(group, term) %>%
+  # Lock in the order for ggplot (reversed because of coord_flip)
+  mutate(term_label = factor(term, levels = rev(unique(term))),
+         color = ifelse(estimate > 1, "Increase", "Decrease"))
+
+# 2. Forest plot
+ggplot(posterior_df, aes(x = term_label, y = estimate, color = color)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black") +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+  geom_point(size = 3) +
+  coord_flip() +
+  scale_color_manual(values = c("Increase" = "blue", "Decrease" = "red")) +
+  labs(
+    x = "",
+    y = "Odds Ratio (95% Credible Interval)",
+    color = "Effect"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+
+
+
+
+```{r}
+library(tidyverse)
+library(broom.mixed)
+
+# 1. Get the raw results from rstanarm
+# Changed 'prob' to 'conf.level'
+results <- tidy(fit_rstanarm, conf.int = TRUE, exponentiate = TRUE, conf.level = 0.95) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    # Approximate p-value from Z-score (Standard for academic tables)
+    p.value = 2 * (1 - pnorm(abs(estimate / std.error))), 
+    OR = sprintf("%.2f", estimate),
+    CI = sprintf("%.2f, %.2f", conf.low, conf.high),
+    P = case_when(
+      p.value < 0.001 ~ "<0.001",
+      p.value >= 0.99 ~ ">0.99",
+      TRUE ~ sprintf("%.3f", p.value)
+    )
+  )
+
+
+clean_table <- results %>%
+  mutate(group = case_when(
+    str_detect(term, "Age") ~ "Age (ref: 18-24)",
+    str_detect(term, "Gender") ~ "Gender (ref: Female)",
+    str_detect(term, "social_grade") ~ "Social Grade (ref: High)",
+    str_detect(term, "ethnicity_grp") ~ "Ethnicity (ref: White)",
+    str_detect(term, "marital_status") ~ "Marital Status (ref: Married/ Civil Partnership)",
+    str_detect(term, "house_tenure") ~ "Housing Tenure (ref: Own outright)",
+    str_detect(term, "working_status") ~ "Working Status (ref: Working full-time)",
+    str_detect(term, "parent_guardian") ~ "Parent/Guardian of Child Aged (ref: 4 years and under)",
+    str_detect(term, "children_in_household") ~ "Number of Children in Household (ref: 0)",
+    TRUE ~ "Other"
+  )) %>%
+  # This regex removes the variable name prefix to leave just the level name
+  mutate(level_name = str_remove(term, "Age|Gender|social_grade|ethnicity_grp|marital_status|house_tenure|working_status|parent_guardian|children_in_household"))
+
+group_order <- c("Age (ref: 18-24)", "Gender (ref: Female)", "Social Grade (ref: High)", 
+                 "Ethnicity (ref: White)", "Marital Status (ref: Married/ Civil Partnership)", 
+                 "Housing Tenure (ref: Own outright)", "Working Status (ref: Working full-time)", 
+                 "Parent/Guardian of Child Aged (ref: 4 years and under)", "Number of Children in Household (ref: 0)")
+
+cat("% Copy the lines below into your LaTeX tabular environment\n")
+for(g in group_order) {
+  # Print the Header Row
+  cat(paste0(g, " &  &  &  \\\\ \n"))
+  cat("\\addlinespace[2.5pt]\n") # Adds the space you had in your template
+  
+  # Filter and print the indented sub-rows
+  sub_grp <- clean_table %>% filter(group == g)
+  
+  if(nrow(sub_grp) > 0) {
+    for(i in 1:nrow(sub_grp)) {
+      # Use quadruple backslashes to result in two backslashes in the output
+      cat(paste0("\\;\\;\\;\\;", sub_grp$level_name[i], " & ", 
+                 sub_grp$OR[i], " & ", sub_grp$CI[i], " & ", sub_grp$P[i], " \\\\ \n"))
+    }
+  }
+}
+
+```
+
+
+```{r}
+
+
+library(tidyverse)
+library(broom.mixed)
+
+# 1. Tidy the model
+posterior_df <- tidy(fit_rstanarm, conf.int = TRUE, exponentiate = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(term = factor(term, levels = term)) %>%   # <-- LOCK ORDER
+  mutate(group = case_when(
+    str_detect(term, "Age") ~ "Age",
+    str_detect(term, "Gender") ~ "Gender",
+    str_detect(term, "social_grade") ~ "Social Grade",
+    str_detect(term, "ethnicity_grp") ~ "Ethnicity",
+    str_detect(term, "marital_status") ~ "Marital Status",
+    str_detect(term, "house_tenure") ~ "Housing Tenure",
+    str_detect(term, "working_status") ~ "Working Status",
+    str_detect(term, "parent_guardian") ~ "Parent/Guardian",
+    str_detect(term, "children_in_household") ~ "Number of Children in Household",
+    TRUE ~ "Other"
+  )) %>%
+  # 3. STRICTLY ORDER THE GROUPS
+  # We use fct_relevel to define the top-to-bottom order you requested
+  mutate(group = fct_relevel(group, 
+                             "Age", "Gender", "Social Grade", "Ethnicity", 
+                             "Marital Status", "Housing Tenure", "Working Status", 
+                             "Parent/Guardian", "Number of Children in Household")) %>%
+  # 4. ORDER THE ROWS WITHIN THE GROUPS
+  # We arrange by the group level, then by the estimate
+  # Create the factor levels for 'term' based on this specific sorted order
+  mutate(term = factor(term, levels = rev(unique(term)))) %>%
+  mutate(color = ifelse(estimate > 1, "Increase", "Decrease"))
+
+# 5. Forest plot
+ggplot(posterior_df, aes(x = term, y = estimate, color = color)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black") +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.3) +
+  geom_point(size = 3) +
+  coord_flip() +
+  scale_color_manual(values = c("Increase" = "blue", "Decrease" = "red")) +
+  labs(
+    x = "Predictors",
+    y = "Odds Ratio (95% Credible Interval)",
+    color = "Effect"
+  ) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank(),
+              legend.position = "none",
+        panel.border = element_blank(),
+    
+    # 2. Add back only the Left (Y) and Bottom (X) lines
+    axis.line = element_line(color = "black", linewidth = 0.5),
+    #     axis.text.y = element_text(size = 10),
+    # # Increase the size of the numbers on the bottom axis
+    # axis.text.x = element_text(size = 10),
+        aspect.ratio = 1.4,
+    axis.ticks = element_blank(),
+    axis.text.y = element_text(size = 10, color = "black"),
+    # Bold the Odds Ratio numbers (Bottom) - ONLY ONE INSTANCE HERE
+    axis.text.x = element_text(size = 10, color = "black"),
+    # Bold the Axis Titles
+    # axis.title.x = element_text(face = "bold"),
+    # axis.title.y = element_text(face = "bold")
+    )+
+  scale_x_discrete(
+  limits = rev(unname(plot_labels)),   # enforce full order including headers
+  labels = plot_labels_rev
+)
+```
+
+
+
+## MMR doses
+
+```{r mmr_doses-fits, fig.height=10, message=FALSE, warning=FALSE}
+
+
+# idc_to_rem = unique(c(which(dat_mmr$children_in_household == "Refused"),
+# which(dat_mmr$house_tenure == "blank"),
+# which(dat_mmr$marital_status == "blank")))
+# dat_mmr_clean = dat_mmr[-idc_to_rem,]
+# dat_mmr_clean = dat_mmr[-idc_to_rem,]
+# dat_mmr_clean$marital_status = fct_collapse(dat_mmr_clean$marital_status, Widowed = c("Widowed", "blank"))
+# dat_mmr_clean$house_tenure = fct_collapse(dat_mmr_clean$house_tenure, Other = c("Other", "blank"))
+# dat_mmr_clean$children_in_household = fct_collapse(dat_mmr_clean$children_in_household, "3+" = c("3+", "Refused"))
+
+ dat_mmr_clean = dat_mmr |>
+  dplyr::filter(ethnicity_grp != "Other",              # separation
+                marital_status != "blank") %>%
+droplevels()
+  
+dat_mmr_clean$house_tenure <- fct_collapse(dat_mmr_clean$house_tenure,
+  "Own" = c("Own outright", "Own with a mortgage", "Shared ownership scheme"),
+  "Missing" = "blank"
+)
+
+fit_rstanarm <- stan_glm(
+  mmr_doses ~ Age + Gender + social_grade + ethnicity_grp +
+    marital_status + house_tenure + working_status +
+    parent_guardian + children_in_household,
+  
+  data = dat_mmr_clean,
+  family = binomial(link = "logit"),
+    prior = normal(location = 0, scale = 1, autoscale = FALSE),
+  weights = weight,
+  
+  # prior = normal(location = 0, scale = 100, autoscale = FALSE),
+  # prior_intercept = normal(location = 0, scale = 100, autoscale = FALSE),
+  
+  chains = 4,
+  iter = 2000,
+  seed = 123
+)
+
+
+y_rep <- posterior_predict(fit_rstanarm)
+ppc_stat(y = dat_mmr_clean$mmr_doses, yrep = y_rep[1:4000, ], stat = "mean")
+
+
+predictors <- c("Age", "Gender", "social_grade", "ethnicity_grp", 
+                "marital_status", "house_tenure", "working_status", 
+                "parent_guardian", "children_in_household")
+
+eff_df_bayesian <- map_dfr(predictors, function(p) {
+  
+  # 1. Create the grid for this specific predictor
+  nd <- dat_mmr_clean %>%
+    modelr::data_grid(!!sym(p), .model = dat_mmr_clean)
+  
+  
+  # 2. Get the draws on the probability scale
+  post_probs <- posterior_epred(fit_rstanarm, newdata = nd, re_formula = NULL)
+  
+  # 3. Calculate the proportion of draws >= 0.5 for each level
+  # colMeans on a logical comparison gives the probability (0 to 1)
+  p_gt_50 <- colMeans(post_probs >= 0.5)
+  lower_vals <- apply(post_probs, 2, quantile, probs = 0.025)
+  upper_vals <- apply(post_probs, 2, quantile, probs = 0.975)
+  # 4. Summary statistics
+  nd %>%
+    mutate(
+      predictor = p,
+      predictor_level = as.character(!!sym(p)),
+      fit = colMeans(post_probs),
+      lower = apply(post_probs, 2, quantile, probs = 0.025),
+      upper = apply(post_probs, 2, quantile, probs = 0.975),
+      # New column: 1 if more than half the posterior mass is >= 0.5, else 0
+      # Or simply keep it as a continuous probability if you prefer
+      #above_50_threshold = ifelse(p_gt_50 >= 0.5, 1, 0) 
+      above_50_threshold = case_when(
+        p_gt_50 < 0.5                       ~ 0,
+        p_gt_50 >= 0.5 & lower_vals <= 0.5  ~ 1,
+        p_gt_50 >= 0.5 & lower_vals > 0.5   ~ 2
+      )
+    ) %>%
+    select(predictor, predictor_level, fit, lower, upper, above_50_threshold)
+})
+
+eff_df_bayesian <- eff_df_bayesian %>%
+  mutate(threshold_group = case_when(
+    above_50_threshold == 2 ~ "Above C.I. no overlap 50%",
+    above_50_threshold == 1 ~ "Above C.I. overlap 50%",
+    above_50_threshold == 0 ~ "Below C.I. overlap 50%"
+  ))
+
+
+# 1. Update your nice_names to include line breaks for the long ones
+nice_names <- c(
+  "Age" = "Age",
+  "children_in_household" = "Children\nin HH",
+  "ethnicity_grp" = "Ethnicity",
+  "Gender" = "Gender",
+  "house_tenure" = "Housing",
+  "marital_status" = "Marital\nStatus",
+  "parent_guardian" = "Parental\nStatus",
+  "social_grade" = "Social\nGrade",
+  "working_status" = "Work\nStatus"
+)
+
+# 2. Run the plot with the labeller
+ggplot(eff_df_bayesian, aes(x = predictor_level, y = fit, color = threshold_group)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "blue", linewidth = 0.8) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) +
+  
+  scale_color_manual(values = c("Above C.I. no overlap 50%" = "green", 
+                                "Above C.I. overlap 50%" = "grey", 
+                                "Below C.I. overlap 50%" = "red")) + 
+  
+  # Use the 'labeller' argument to map the raw names to your nice names
+  facet_grid(~ predictor, 
+             scales = "free_x", 
+             space = "free_x", 
+             labeller = as_labeller(nice_names)) + 
+  
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.background = element_blank(),           
+    strip.text = element_text(face = "bold", size = 11, lineheight = 0.9), 
+    panel.spacing = unit(0.5, "lines") # Increased slightly from 0 to avoid text overlap
+  ) +
+  labs(
+    y = "Probability vaccinated MMR dose",
+    x = "Predictor Level",
+    color = "Probability Threshold",
+    title = "Posterior Predictive Probabilities"
+  )
+```
+
+```{r mmr_doses_table, message=FALSE, warning=FALSE}
+broom::tidy(fit_rstanarm, conf.int = TRUE) |> 
+  kable(digits = 3, caption = "Logistic Regression Results") %>%
+  kable_styling(full_width = FALSE)
+
+
+library(rstanarm)
+library(broom.mixed)
+library(knitr)
+library(kableExtra)
+tab_latex <- broom::tidy(
+  fit_rstanarm,
+  conf.int = TRUE,
+  # conf.level = 0.95,
+  # conf.method = "quantile",
+  exponentiate = FALSE   # remove if you want log-odds
+)
+
+latex_table <- kable(
+  tab_latex,
+  format = "latex",
+  booktabs = TRUE,
+  digits = 3,
+  caption = "Bayesian Logistic Regression Results (Odds Ratios, 95\\% Credible Intervals)",
+  label = "tab:bayes_logit"
+)
+
+cat(latex_table)
+
+
+```
+
+
+
+
+```{r}
+
+library(tidyverse)
+library(broom.mixed)
+
+# 1. Process data with your specific categorical order
+posterior_df <- tidy(fit_rstanarm, conf.int = TRUE, exponentiate = TRUE) %>%
+  select(term, estimate, conf.low, conf.high) %>%
+  filter(term != "(Intercept)") %>%
+  # Create a numeric index based on your requested order
+  mutate(group_order = case_when(
+    str_detect(term, "Age") ~ 1,
+    str_detect(term, "Gender") ~ 2,
+    str_detect(term, "social_grade") ~ 3,
+    str_detect(term, "ethnicity_grp") ~ 4,
+    str_detect(term, "marital_status") ~ 5,
+    str_detect(term, "house_tenure") ~ 6,
+    str_detect(term, "working_status") ~ 7,
+    str_detect(term, "parent_guardian") ~ 8,
+    str_detect(term, "children_in_household") ~ 9,
+    TRUE ~ 10
+  )) %>%
+  # Arrange by the group order, then by the term itself
+  arrange(group_order, term) %>%
+  # Create the factor levels based on the arranged order
+  # We use rev() because coord_flip plots the first level at the bottom
+  mutate(term_label = factor(term, levels = rev(unique(term))),
+         color = ifelse(estimate > 1, "Increase", "Decrease"))
+
+# 2. Forest plot
+ggplot(posterior_df, aes(x = term_label, y = estimate, color = color)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black") + # Moved back for cleaner look
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+  geom_point(size = 3) +
+  coord_flip() +
+  scale_color_manual(values = c("Increase" = "blue", "Decrease" = "red")) +
+  labs(
+    x = "",
+    y = "Odds Ratio (95% Credible Interval)",
+    color = "Effect"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+
+```{r}
+library(tidyverse)
+library(broom.mixed)
+
+# 1. Get the raw results from rstanarm
+# Changed 'prob' to 'conf.level'
+results <- tidy(fit_rstanarm, conf.int = TRUE, exponentiate = TRUE, conf.level = 0.95) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    # Approximate p-value from Z-score (Standard for academic tables)
+    p.value = 2 * (1 - pnorm(abs(estimate / std.error))), 
+    OR = sprintf("%.2f", estimate),
+    CI = sprintf("%.2f, %.2f", conf.low, conf.high),
+    P = case_when(
+      p.value < 0.001 ~ "<0.001",
+      p.value >= 0.99 ~ ">0.99",
+      TRUE ~ sprintf("%.3f", p.value)
+    )
+  )
+
+
+clean_table <- results %>%
+  mutate(group = case_when(
+    str_detect(term, "Age") ~ "Age (ref: 18-24)",
+    str_detect(term, "Gender") ~ "Gender (ref: Female)",
+    str_detect(term, "social_grade") ~ "Social Grade (ref: High)",
+    str_detect(term, "ethnicity_grp") ~ "Ethnicity (ref: White)",
+    str_detect(term, "marital_status") ~ "Marital Status (ref: Married/ Civil Partnership)",
+    str_detect(term, "house_tenure") ~ "Housing Tenure (ref: Own)",
+    str_detect(term, "working_status") ~ "Working Status (ref: Working full-time)",
+    str_detect(term, "parent_guardian") ~ "Parent/Guardian of Child Aged (ref: 4 years and under)",
+    str_detect(term, "children_in_household") ~ "Number of Children in Household (ref: 0)",
+    TRUE ~ "Other"
+  )) %>%
+  # This regex removes the variable name prefix to leave just the level name
+  mutate(level_name = str_remove(term, "Age|Gender|social_grade|ethnicity_grp|marital_status|house_tenure|working_status|parent_guardian|children_in_household"))
+
+group_order <- c("Age (ref: 18-24)", "Gender (ref: Female)", "Social Grade (ref: High)", 
+                 "Ethnicity (ref: White)", "Marital Status (ref: Married/ Civil Partnership)", 
+                 "Housing Tenure (ref: Own)", "Working Status (ref: Working full-time)", 
+                 "Parent/Guardian of Child Aged (ref: 4 years and under)", "Number of Children in Household (ref: 0)")
+
+cat("% Copy the lines below into your LaTeX tabular environment\n")
+for(g in group_order) {
+  # Print the Header Row
+  cat(paste0(g, " &  &  &  \\\\ \n"))
+  cat("\\addlinespace[2.5pt]\n") # Adds the space you had in your template
+  
+  # Filter and print the indented sub-rows
+  sub_grp <- clean_table %>% filter(group == g)
+  
+  if(nrow(sub_grp) > 0) {
+    for(i in 1:nrow(sub_grp)) {
+      # Use quadruple backslashes to result in two backslashes in the output
+      cat(paste0("\\;\\;\\;\\;", sub_grp$level_name[i], " & ", 
+                 sub_grp$OR[i], " & ", sub_grp$CI[i], " & ", sub_grp$P[i], " \\\\ \n"))
+    }
+  }
+}
+
+```
+
+
+```{r}
+
+plot_labels <- c(
+  "25-34",
+  "35-44",
+  "45-54", 
+  "≥55",
+  "Male",
+  "Low",
+  "Asian",
+  "Black",
+  "Mixed",
+  "Other",
+  "Prefer not to say",
+  "Living as married",
+  "Never Married",
+  "Separated/ Divorced",
+  "Widowed",
+  "Missing",
+  "Rent-free" = "house_tenureRent-free",
+  "Rent from a housing association",
+  "Rent from a private landlord",
+  "Rent from my local authority",
+  "Family/ friends but pay rent",
+  "Other",
+  "Missing",
+  "Working part-time",
+  "Full-time student",
+  "Not working/ Other",
+  "Retired",
+  "Unemployed",
+  "5 to 11 years",
+  "12 to 16 years",
+  "17 to 18 years",
+  "Over 18 years",
+  "Not parent/ guardian",
+  "1",
+  "2",
+  "≥3",
+  "Refused"
+)
+
+plot_labels <- c(
+  "Age (ref: 18-24)" = "header_age",
+  "   25-34" = "Age25-34",
+  "   35-44" = "Age35-44",
+  "   45-54" = "Age45-54",
+  "   ≥ 55" = "Age55+",
+  "Gender (ref: Female)" = "header_gender",
+  "   Male" = "GenderMale",
+  "Social Grade (ref: High)" = "header_social",
+  "   Low" = "social_gradeLow",
+  "Ethnicity (ref: White)" = "header_eth",
+  "   Asian" = "ethnicity_grpAsian",
+  "   Black" = "ethnicity_grpBlack",
+  "   Mixed" = "ethnicity_grpMixed",
+  "   Other" = "ethnicity_grpOther",
+  "   Prefer not to say" = "ethnicity_grpPrefer not to say",
+  "Marital Status (ref: Married/ Civil Partnership)" = "header_marital",
+  "   Living as married" = "marital_statusLiving as married",
+  "   Never Married" = "marital_statusNever Married",
+  "   Separated/ Divorced" = "marital_statusSeparated/ Divorced",
+  "   Widowed" = "marital_statusWidowed",
+  "   Missing" = "marital_statusMissing",
+  "Housing Tenure (ref: Own)" = "header_housing",
+  "   Rent-free" = "house_tenureRent-free",
+  "   Rent from a housing association" = "house_tenureRent from a housing association",
+  "   Rent from a private landlord" = "house_tenureRent from a private landlord",
+  "   Rent from my local authority" = "house_tenureRent from my local authority",
+  "   Family/ friends but pay rent" = "house_tenureFamily/ friends but pay rent",
+  "   Other" = "house_tenureOther",
+  "   Missing" = "house_tenureMissing",
+  "Working Status (ref: Working full-time)" = "header_work",
+  "   Working part-time" = "working_statusWorking part time",
+  "   Full-time student" = "working_statusFull time student",
+  "   Not working/ Other" = "working_statusNot working/ Other",
+  "   Retired" = "working_statusRetired",
+  "   Unemployed" = "working_statusUnemployed",
+  "Parent/Guardian of Child Aged (ref: 4 years and under)" = "header_parent",
+  "   5 to 11 years" = "parent_guardian5 to 11 years",
+  "   12 to 16 years" = "parent_guardian12 to 16 years",
+  "   17 to 18 years" = "parent_guardian17 to 18 years",
+  "   Over 18 years" = "parent_guardianOver 18 years",
+  "   Not parent/ guardian" = "parent_guardianNot parent/ guardian",
+  "Number of Children in Household (ref: 0)" = "header_children",
+  "   1" = "children_in_household1",
+  "   2" = "children_in_household2",
+  "   ≥ 3" = "children_in_household3+",
+  "   Refused" = "children_in_householdRefused"
+)
+
+plot_labels_rev <- setNames(names(plot_labels), plot_labels)
+
+
+# plot_labels <- c(
+#   "25-34",
+#   "35-44",
+#   "45-54", 
+#   "≥55",
+#   "Male",
+#   "Low",
+#   "Asian",
+#   "Black",
+#   "Mixed",
+#   "Other",
+#   "Prefer not to say",
+#   "Living as married",
+#   "Never Married",
+#   "Separated/ Divorced",
+#   "Widowed",
+#   "blank",
+#   "Own with a mortgage" = "house_tenureOwn with a mortgage",
+#   "Rent-free" = "house_tenureRent-free",
+#   "Rent from a housing association",
+#   "Rent from a private landlord",
+#   "Rent from my local authority",
+#   "Family/ friends but pay rent",
+#   "Shared ownership scheme",
+#   "Other",
+#   "blank",
+#   "Working part time",
+#   "Full time student",
+#   "Not working/ Other",
+#   "Retired",
+#   "Unemployed",
+#   "5 to 11 years",
+#   "12 to 16 years",
+#   "17 to 18 years",
+#   "Over 18 years",
+#   "Not parent/ guardian",
+#   "1",
+#   "2",
+#   "≥3",
+#   "Refused"
+# )
+# 
+# plot_labels <- c(
+#   "Age (ref: 18-24)" = "header_age",
+#   "   25-34" = "Age25-34",
+#   "   35-44" = "Age35-44",
+#   "   45-54" = "Age45-54",
+#   "   ≥ 55" = "Age55+",
+#   "Gender (ref: Female)" = "header_gender",
+#   "   Male" = "GenderMale",
+#   "Social Grade (ref: High)" = "header_social",
+#   "   Low" = "social_gradeLow",
+#   "Ethnicity (ref: White)" = "header_eth",
+#   "   Asian" = "ethnicity_grpAsian",
+#   "   Black" = "ethnicity_grpBlack",
+#   "   Mixed" = "ethnicity_grpMixed",
+#   "   Other" = "ethnicity_grpOther",
+#   "   Prefer not to say" = "ethnicity_grpPrefer not to say",
+#   "Marital Status (ref: Married/ Civil Partnership)" = "header_marital",
+#   "   Living as married" = "marital_statusLiving as married",
+#   "   Never Married" = "marital_statusNever Married",
+#   "   Separated/ Divorced" = "marital_statusSeparated/ Divorced",
+#   "   Widowed" = "marital_statusWidowed",
+#   "   blank" = "marital_statusblank",
+#   "Housing Tenure (ref: Own outright)" = "header_housing",
+#   "   Own with a mortgage" = "house_tenureOwn with a mortgage",
+#   "   Rent-free" = "house_tenureRent-free",
+#   "   Rent from a housing association" = "house_tenureRent from a housing association",
+#   "   Rent from a private landlord" = "house_tenureRent from a private landlord",
+#   "   Rent from my local authority" = "house_tenureRent from my local authority",
+#   "   Family/ friends but pay rent" = "house_tenureFamily/ friends but pay rent",
+#   "   Shared ownership scheme" = "house_tenureShared ownership scheme",
+#   "   Other" = "house_tenureOther",
+#   "   blank" = "house_tenureblank",
+#   "Working Status (ref: Working full time)" = "header_work",
+#   "   Working part time" = "working_statusWorking part time",
+#   "   Full time student" = "working_statusFull time student",
+#   "   Not working/ Other" = "working_statusNot working/ Other",
+#   "   Retired" = "working_statusRetired",
+#   "   Unemployed" = "working_statusUnemployed",
+#   "Parent/Guardian of Child Aged (ref: 4 years and under)" = "header_parent",
+#   "   5 to 11 years" = "parent_guardian5 to 11 years",
+#   "   12 to 16 years" = "parent_guardian12 to 16 years",
+#   "   17 to 18 years" = "parent_guardian17 to 18 years",
+#   "   Over 18 years" = "parent_guardianOver 18 years",
+#   "   Not parent/ guardian" = "parent_guardianNot parent/ guardian",
+#   "Children in Household (ref: 0)" = "header_children",
+#   "   1" = "children_in_household1",
+#   "   2" = "children_in_household2",
+#   "   ≥ 3" = "children_in_household3+",
+#   "   Refused" = "children_in_householdRefused"
+# )
+# 
+# plot_labels_rev <- setNames(names(plot_labels), plot_labels)
+
+```
+
+
+
+```{r}
+
+
+library(tidyverse)
+library(broom.mixed)
+
+# 1. Tidy the model
+posterior_df <- tidy(fit_rstanarm, conf.int = TRUE, exponentiate = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(term = factor(term, levels = term)) %>%   # <-- LOCK ORDER
+  mutate(group = case_when(
+    str_detect(term, "Age") ~ "Age",
+    str_detect(term, "Gender") ~ "Gender",
+    str_detect(term, "social_grade") ~ "Social Grade",
+    str_detect(term, "ethnicity_grp") ~ "Ethnicity",
+    str_detect(term, "marital_status") ~ "Marital Status",
+    str_detect(term, "house_tenure") ~ "Housing Tenure",
+    str_detect(term, "working_status") ~ "Working Status",
+    str_detect(term, "parent_guardian") ~ "Parent/Guardian",
+    str_detect(term, "children_in_household") ~ "Number of Children in Household",
+    TRUE ~ "Other"
+  )) %>%
+  # 3. STRICTLY ORDER THE GROUPS
+  # We use fct_relevel to define the top-to-bottom order you requested
+  mutate(group = fct_relevel(group, 
+                             "Age", "Gender", "Social Grade", "Ethnicity", 
+                             "Marital Status", "Housing Tenure", "Working Status", 
+                             "Parent/Guardian", "Number of Children in Household")) %>%
+  # 4. ORDER THE ROWS WITHIN THE GROUPS
+  # We arrange by the group level, then by the estimate
+  # Create the factor levels for 'term' based on this specific sorted order
+  mutate(term = factor(term, levels = rev(unique(term)))) %>%
+  mutate(color = ifelse(estimate > 1, "Increase", "Decrease"))
+
+# 5. Forest plot
+ggplot(posterior_df, aes(x = term, y = estimate, color = color)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black") +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.3) +
+  geom_point(size = 3) +
+  coord_flip() +
+  scale_color_manual(values = c("Increase" = "blue", "Decrease" = "red")) +
+  labs(
+    x = "Predictors",
+    y = "Odds Ratio (95% Credible Interval)",
+    color = "Effect"
+  ) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank(),
+         legend.position = "none",
+        panel.border = element_blank(),
+    
+    # 2. Add back only the Left (Y) and Bottom (X) lines
+    axis.line = element_line(color = "black", linewidth = 0.5),
+    #     axis.text.y = element_text(size = 10),
+    # # Increase the size of the numbers on the bottom axis
+    # axis.text.x = element_text(size = 10),
+         aspect.ratio = 1.4,
+    axis.ticks = element_blank(),        # Removes the little lines
+    axis.text.y = element_text(size = 10,  color = "black"),
+    # Bold the Odds Ratio numbers (Bottom) - ONLY ONE INSTANCE HERE
+    axis.text.x = element_text(size = 10,  color = "black"),
+    # Bold the Axis Titles
+    # axis.title.x = element_text(face = "bold"),
+    # axis.title.y = element_text(face = "bold")
+    )+
+  scale_x_discrete(
+  limits = rev(unname(plot_labels)),   # enforce full order including headers
+  labels = plot_labels_rev
+)
+```
+
+
+
+
+## Vaccine effective
+
+```{r vacc_eff-fits, fig.height=10, message=FALSE, warning=FALSE}
+
+ dat_vacc_eff_clean = dat_vacc_eff |> 
+  dplyr::filter(ethnicity_grp != "Prefer not to say")%>%
+droplevels()
+
+dat_vacc_eff_clean$house_tenure <- fct_collapse(dat_vacc_eff_clean$house_tenure,
+  "Own" = c("Own outright", "Own with a mortgage", "Shared ownership scheme"),
+  "Missing" = "blank"
+)
+levels(dat_vacc_eff_clean$marital_status)[levels(dat_vacc_eff_clean$marital_status) == "blank"] <- "Missing"
+
+
+fit_rstanarm <- stan_glm(
+  vacc_eff ~ Age + Gender + social_grade + ethnicity_grp +
+    marital_status + house_tenure + working_status +
+    parent_guardian + children_in_household,
+  
+  data = dat_vacc_eff_clean,
+  family = binomial(link = "logit"),
+  
+  
+    prior = normal(location = 0, scale = 1, autoscale = FALSE),
+  weights = weight,
+  
+  #prior = laplace(location = 0, scale = NULL, autoscale = TRUE),#normal(location = 0, scale = 10, autoscale = FALSE),
+  # prior_intercept = normal(location = 0, scale = 10, autoscale = FALSE),
+  
+  chains = 4,
+  iter = 2000,
+  seed = 123
+)
+
+y_rep <- posterior_predict(fit_rstanarm)
+ppc_stat(y = dat_vacc_eff_clean$vacc_eff, yrep = y_rep[1:4000, ], stat = "mean")
+
+
+predictors <- c("Age", "Gender", "social_grade", "ethnicity_grp", 
+                "marital_status", "house_tenure", "working_status", 
+                "parent_guardian", "children_in_household")
+
+eff_df_bayesian <- map_dfr(predictors, function(p) {
+  
+  # 1. Create the grid for this specific predictor
+  nd <- dat_vacc_eff_clean %>%
+    modelr::data_grid(!!sym(p), .model = dat_vacc_eff_clean)
+  
+  
+  # 2. Get the draws on the probability scale
+  post_probs <- posterior_epred(fit_rstanarm, newdata = nd, re_formula = NULL)
+  
+  # 3. Calculate the proportion of draws >= 0.5 for each level
+  # colMeans on a logical comparison gives the probability (0 to 1)
+  p_gt_50 <- colMeans(post_probs >= 0.5)
+  lower_vals <- apply(post_probs, 2, quantile, probs = 0.025)
+  upper_vals <- apply(post_probs, 2, quantile, probs = 0.975)
+  # 4. Summary statistics
+  nd %>%
+    mutate(
+      predictor = p,
+      predictor_level = as.character(!!sym(p)),
+      fit = colMeans(post_probs),
+      lower = apply(post_probs, 2, quantile, probs = 0.025),
+      upper = apply(post_probs, 2, quantile, probs = 0.975),
+      # New column: 1 if more than half the posterior mass is >= 0.5, else 0
+      # Or simply keep it as a continuous probability if you prefer
+      #above_50_threshold = ifelse(p_gt_50 >= 0.5, 1, 0) 
+      above_50_threshold = case_when(
+        p_gt_50 < 0.5                       ~ 0,
+        p_gt_50 >= 0.5 & lower_vals <= 0.5  ~ 1,
+        p_gt_50 >= 0.5 & lower_vals > 0.5   ~ 2
+      )
+    ) %>%
+    select(predictor, predictor_level, fit, lower, upper, above_50_threshold)
+})
+
+eff_df_bayesian <- eff_df_bayesian %>%
+  mutate(threshold_group = case_when(
+    above_50_threshold == 2 ~ "Above C.I. no overlap 50%",
+    above_50_threshold == 1 ~ "Above C.I. overlap 50%",
+    above_50_threshold == 0 ~ "Below C.I. overlap 50%"
+  ))
+
+
+# 1. Update your nice_names to include line breaks for the long ones
+nice_names <- c(
+  "Age" = "Age",
+  "children_in_household" = "Children\nin HH",
+  "ethnicity_grp" = "Ethnicity",
+  "Gender" = "Gender",
+  "house_tenure" = "Housing",
+  "marital_status" = "Marital\nStatus",
+  "parent_guardian" = "Parental\nStatus",
+  "social_grade" = "Social\nGrade",
+  "working_status" = "Work\nStatus"
+)
+
+# 2. Run the plot with the labeller
+ggplot(eff_df_bayesian, aes(x = predictor_level, y = fit, color = threshold_group)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "blue", linewidth = 0.8) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) +
+  
+  scale_color_manual(values = c("Above C.I. no overlap 50%" = "green", 
+                                "Above C.I. overlap 50%" = "grey", 
+                                "Below C.I. overlap 50%" = "red")) + 
+  
+  # Use the 'labeller' argument to map the raw names to your nice names
+  facet_grid(~ predictor, 
+             scales = "free_x", 
+             space = "free_x", 
+             labeller = as_labeller(nice_names)) + 
+  
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.background = element_blank(),           
+    strip.text = element_text(face = "bold", size = 11, lineheight = 0.9), 
+    panel.spacing = unit(0.5, "lines") # Increased slightly from 0 to avoid text overlap
+  ) +
+  labs(
+    y = "Probability vaccine effectiveness",
+    x = "Predictor Level",
+    color = "Probability Threshold",
+    title = "Posterior Predictive Probabilities"
+  )
+```
+
+```{r vacc_eff_table, message=FALSE, warning=FALSE}
+broom::tidy(fit_rstanarm, conf.int = TRUE) |> 
+  kable(digits = 3, caption = "Logistic Regression Results") %>%
+  kable_styling(full_width = FALSE)
+
+
+library(rstanarm)
+library(broom.mixed)
+library(knitr)
+library(kableExtra)
+tab_latex <- broom.mixed::tidy(
+  fit_rstanarm,
+  conf.int = TRUE,
+  conf.level = 0.95,
+  conf.method = "quantile",
+  exponentiate = FALSE   # remove if you want log-odds
+)
+
+latex_table <- kable(
+  tab_latex,
+  format = "latex",
+  booktabs = TRUE,
+  digits = 3,
+  caption = "Bayesian Logistic Regression Results (Odds Ratios, 95\\% Credible Intervals)",
+  label = "tab:bayes_logit"
+)
+
+cat(latex_table)
+
+
+```
+
+
+```{r}
+library(tidyverse)
+library(broom.mixed)
+
+# 1. Process data with strict categorical ordering
+posterior_df <- tidy(fit_rstanarm, conf.int = TRUE, exponentiate = TRUE) %>%
+  select(term, estimate, conf.low, conf.high) %>%
+  filter(term != "(Intercept)") %>%
+  # Define the categorical order you requested
+  mutate(group_order = case_when(
+    str_detect(term, "Age") ~ 1,
+    str_detect(term, "Gender") ~ 2,
+    str_detect(term, "social_grade") ~ 3,
+    str_detect(term, "ethnicity_grp") ~ 4,
+    str_detect(term, "marital_status") ~ 5,
+    str_detect(term, "house_tenure") ~ 6,
+    str_detect(term, "working_status") ~ 7,
+    str_detect(term, "parent_guardian") ~ 8,
+    str_detect(term, "children_in_household") ~ 9,
+    TRUE ~ 10
+  )) %>%
+  # Arrange by the group order index
+  arrange(group_order, term) %>%
+  # Use rev() so the first group (Age) appears at the top after coord_flip()
+  mutate(term_label = factor(term, levels = rev(unique(term))),
+         color = ifelse(estimate > 1, "Increase", "Decrease"))
+
+# 2. Forest plot
+ggplot(posterior_df, aes(x = term_label, y = estimate, color = color)) +
+  # Reference line at 1 for Odds Ratios
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black") +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+  geom_point(size = 3) +
+  coord_flip() +
+  scale_color_manual(values = c("Increase" = "blue", "Decrease" = "red")) +
+  labs(
+    x = "",
+    y = "Odds Ratio (95% Credible Interval)",
+    color = "Effect"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+
+```{r}
+library(tidyverse)
+library(broom.mixed)
+
+# 1. Get the raw results from rstanarm
+# Changed 'prob' to 'conf.level'
+results <- tidy(fit_rstanarm, conf.int = TRUE, exponentiate = TRUE, conf.level = 0.95) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    # Approximate p-value from Z-score (Standard for academic tables)
+    p.value = 2 * (1 - pnorm(abs(estimate / std.error))), 
+    OR = sprintf("%.2f", estimate),
+    CI = sprintf("%.2f, %.2f", conf.low, conf.high),
+    P = case_when(
+      p.value < 0.001 ~ "<0.001",
+      p.value >= 0.99 ~ ">0.99",
+      TRUE ~ sprintf("%.3f", p.value)
+    )
+  )
+
+
+clean_table <- results %>%
+  mutate(group = case_when(
+    str_detect(term, "Age") ~ "Age (ref: 18-24)",
+    str_detect(term, "Gender") ~ "Gender (ref: Female)",
+    str_detect(term, "social_grade") ~ "Social Grade (ref: High)",
+    str_detect(term, "ethnicity_grp") ~ "Ethnicity (ref: White)",
+    str_detect(term, "marital_status") ~ "Marital Status (ref: Married/ Civil Partnership)",
+    str_detect(term, "house_tenure") ~ "Housing Tenure (ref: Own)",
+    str_detect(term, "working_status") ~ "Working Status (ref: Working full-time)",
+    str_detect(term, "parent_guardian") ~ "Parent/Guardian of Child Aged (ref: 4 years and under)",
+    str_detect(term, "children_in_household") ~ "Number of Children in Household (ref: 0)",
+    TRUE ~ "Other"
+  )) %>%
+  # This regex removes the variable name prefix to leave just the level name
+  mutate(level_name = str_remove(term, "Age|Gender|social_grade|ethnicity_grp|marital_status|house_tenure|working_status|parent_guardian|children_in_household"))
+
+group_order <- c("Age (ref: 18-24)", "Gender (ref: Female)", "Social Grade (ref: High)", 
+                 "Ethnicity (ref: White)", "Marital Status (ref: Married/ Civil Partnership)", 
+                 "Housing Tenure (ref: Own)", "Working Status (ref: Working full-time)", 
+                 "Parent/Guardian of Child Aged (ref: 4 years and under)", "Number of Children in Household (ref: 0)")
+
+cat("% Copy the lines below into your LaTeX tabular environment\n")
+for(g in group_order) {
+  # Print the Header Row
+  cat(paste0(g, " &  &  &  \\\\ \n"))
+  cat("\\addlinespace[2.5pt]\n") # Adds the space you had in your template
+  
+  # Filter and print the indented sub-rows
+  sub_grp <- clean_table %>% filter(group == g)
+  
+  if(nrow(sub_grp) > 0) {
+    for(i in 1:nrow(sub_grp)) {
+      # Use quadruple backslashes to result in two backslashes in the output
+      cat(paste0("\\;\\;\\;\\;", sub_grp$level_name[i], " & ", 
+                 sub_grp$OR[i], " & ", sub_grp$CI[i], " & ", sub_grp$P[i], " \\\\ \n"))
+    }
+  }
+}
+
+```
+
+
+
+
+```{r}
+
+# plot_labels <- c(
+#   "25-34",
+#   "35-44",
+#   "45-54", 
+#   "≥55",
+#   "Male",
+#   "Low",
+#   "Asian",
+#   "Black",
+#   "Mixed",
+#   "Other",
+#   "Prefer not to say",
+#   "Living as married",
+#   "Never Married",
+#   "Separated/ Divorced",
+#   "Widowed",
+#   "blank",
+#   "Own with a mortgage" = "house_tenureOwn with a mortgage",
+#   "Rent-free" = "house_tenureRent-free",
+#   "Rent from a housing association",
+#   "Rent from a private landlord",
+#   "Rent from my local authority",
+#   "Family/ friends but pay rent",
+#   "Shared ownership scheme",
+#   "Other",
+#   "blank",
+#   "Working part time",
+#   "Full time student",
+#   "Not working/ Other",
+#   "Retired",
+#   "Unemployed",
+#   "5 to 11 years",
+#   "12 to 16 years",
+#   "17 to 18 years",
+#   "Over 18 years",
+#   "Not parent/ guardian",
+#   "1",
+#   "2",
+#   "≥3",
+#   "Refused"
+# )
+# 
+# plot_labels <- c(
+#   "Age (ref: 18-24)" = "header_age",
+#   "   25-34" = "Age25-34",
+#   "   35-44" = "Age35-44",
+#   "   45-54" = "Age45-54",
+#   "   ≥ 55" = "Age55+",
+#   "Gender (ref: Female)" = "header_gender",
+#   "   Male" = "GenderMale",
+#   "Social Grade (ref: High)" = "header_social",
+#   "   Low" = "social_gradeLow",
+#   "Ethnicity (ref: White)" = "header_eth",
+#   "   Asian" = "ethnicity_grpAsian",
+#   "   Black" = "ethnicity_grpBlack",
+#   "   Mixed" = "ethnicity_grpMixed",
+#   "   Other" = "ethnicity_grpOther",
+#   "   Prefer not to say" = "ethnicity_grpPrefer not to say",
+#   "Marital Status (ref: Married/ Civil Partnership)" = "header_marital",
+#   "   Living as married" = "marital_statusLiving as married",
+#   "   Never Married" = "marital_statusNever Married",
+#   "   Separated/ Divorced" = "marital_statusSeparated/ Divorced",
+#   "   Widowed" = "marital_statusWidowed",
+#   "   blank" = "marital_statusblank",
+#   "Housing Tenure (ref: Own outright)" = "header_housing",
+#   "   Own with a mortgage" = "house_tenureOwn with a mortgage",
+#   "   Rent-free" = "house_tenureRent-free",
+#   "   Rent from a housing association" = "house_tenureRent from a housing association",
+#   "   Rent from a private landlord" = "house_tenureRent from a private landlord",
+#   "   Rent from my local authority" = "house_tenureRent from my local authority",
+#   "   Family/ friends but pay rent" = "house_tenureFamily/ friends but pay rent",
+#   "   Shared ownership scheme" = "house_tenureShared ownership scheme",
+#   "   Other" = "house_tenureOther",
+#   "   blank" = "house_tenureblank",
+#   "Working Status (ref: Working full time)" = "header_work",
+#   "   Working part time" = "working_statusWorking part time",
+#   "   Full time student" = "working_statusFull time student",
+#   "   Not working/ Other" = "working_statusNot working/ Other",
+#   "   Retired" = "working_statusRetired",
+#   "   Unemployed" = "working_statusUnemployed",
+#   "Parent/Guardian of Child Aged (ref: 4 years and under)" = "header_parent",
+#   "   5 to 11 years" = "parent_guardian5 to 11 years",
+#   "   12 to 16 years" = "parent_guardian12 to 16 years",
+#   "   17 to 18 years" = "parent_guardian17 to 18 years",
+#   "   Over 18 years" = "parent_guardianOver 18 years",
+#   "   Not parent/ guardian" = "parent_guardianNot parent/ guardian",
+#   "Children in Household (ref: 0)" = "header_children",
+#   "   1" = "children_in_household1",
+#   "   2" = "children_in_household2",
+#   "   ≥ 3" = "children_in_household3+",
+#   "   Refused" = "children_in_householdRefused"
+# )
+# 
+# plot_labels_rev <- setNames(names(plot_labels), plot_labels)
+
+plot_labels <- c(
+  "25-34",
+  "35-44",
+  "45-54", 
+  "≥55",
+  "Male",
+  "Low",
+  "Asian",
+  "Black",
+  "Mixed",
+  "Other",
+  "Prefer not to say",
+  "Living as married",
+  "Never Married",
+  "Separated/ Divorced",
+  "Widowed",
+  "Missing",
+  "Rent-free" = "house_tenureRent-free",
+  "Rent from a housing association",
+  "Rent from a private landlord",
+  "Rent from my local authority",
+  "Family/ friends but pay rent",
+  "Other",
+  "Missing",
+  "Working part-time",
+  "Full-time student",
+  "Not working/ Other",
+  "Retired",
+  "Unemployed",
+  "5 to 11 years",
+  "12 to 16 years",
+  "17 to 18 years",
+  "Over 18 years",
+  "Not parent/ guardian",
+  "1",
+  "2",
+  "≥3",
+  "Refused"
+)
+
+plot_labels <- c(
+  "Age (ref: 18-24)" = "header_age",
+  "   25-34" = "Age25-34",
+  "   35-44" = "Age35-44",
+  "   45-54" = "Age45-54",
+  "   ≥ 55" = "Age55+",
+  "Gender (ref: Female)" = "header_gender",
+  "   Male" = "GenderMale",
+  "Social Grade (ref: High)" = "header_social",
+  "   Low" = "social_gradeLow",
+  "Ethnicity (ref: White)" = "header_eth",
+  "   Asian" = "ethnicity_grpAsian",
+  "   Black" = "ethnicity_grpBlack",
+  "   Mixed" = "ethnicity_grpMixed",
+  "   Other" = "ethnicity_grpOther",
+  "   Prefer not to say" = "ethnicity_grpPrefer not to say",
+  "Marital Status (ref: Married/ Civil Partnership)" = "header_marital",
+  "   Living as married" = "marital_statusLiving as married",
+  "   Never Married" = "marital_statusNever Married",
+  "   Separated/ Divorced" = "marital_statusSeparated/ Divorced",
+  "   Widowed" = "marital_statusWidowed",
+  "   Missing" = "marital_statusMissing",
+  "Housing Tenure (ref: Own)" = "header_housing",
+  "   Rent-free" = "house_tenureRent-free",
+  "   Rent from a housing association" = "house_tenureRent from a housing association",
+  "   Rent from a private landlord" = "house_tenureRent from a private landlord",
+  "   Rent from my local authority" = "house_tenureRent from my local authority",
+  "   Family/ friends but pay rent" = "house_tenureFamily/ friends but pay rent",
+  "   Other" = "house_tenureOther",
+  "   Missing" = "house_tenureMissing",
+  "Working Status (ref: Working full-time)" = "header_work",
+  "   Working part-time" = "working_statusWorking part time",
+  "   Full-time student" = "working_statusFull time student",
+  "   Not working/ Other" = "working_statusNot working/ Other",
+  "   Retired" = "working_statusRetired",
+  "   Unemployed" = "working_statusUnemployed",
+  "Parent/Guardian of Child Aged (ref: 4 years and under)" = "header_parent",
+  "   5 to 11 years" = "parent_guardian5 to 11 years",
+  "   12 to 16 years" = "parent_guardian12 to 16 years",
+  "   17 to 18 years" = "parent_guardian17 to 18 years",
+  "   Over 18 years" = "parent_guardianOver 18 years",
+  "   Not parent/ guardian" = "parent_guardianNot parent/ guardian",
+  "Number of Children in Household (ref: 0)" = "header_children",
+  "   1" = "children_in_household1",
+  "   2" = "children_in_household2",
+  "   ≥ 3" = "children_in_household3+",
+  "   Refused" = "children_in_householdRefused"
+)
+
+plot_labels_rev <- setNames(names(plot_labels), plot_labels)
+
+
+
+```
+
+```{r}
+
+
+library(tidyverse)
+library(broom.mixed)
+
+# 1. Tidy the model
+posterior_df <- tidy(fit_rstanarm, conf.int = TRUE, exponentiate = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(term = factor(term, levels = term)) %>%   # <-- LOCK ORDER
+  mutate(group = case_when(
+    str_detect(term, "Age") ~ "Age",
+    str_detect(term, "Gender") ~ "Gender",
+    str_detect(term, "social_grade") ~ "Social Grade",
+    str_detect(term, "ethnicity_grp") ~ "Ethnicity",
+    str_detect(term, "marital_status") ~ "Marital Status",
+    str_detect(term, "house_tenure") ~ "Housing Tenure",
+    str_detect(term, "working_status") ~ "Working Status",
+    str_detect(term, "parent_guardian") ~ "Parent/Guardian",
+    str_detect(term, "children_in_household") ~ "Number of Children in Household",
+    TRUE ~ "Other"
+  )) %>%
+  # 3. STRICTLY ORDER THE GROUPS
+  # We use fct_relevel to define the top-to-bottom order you requested
+  mutate(group = fct_relevel(group, 
+                             "Age", "Gender", "Social Grade", "Ethnicity", 
+                             "Marital Status", "Housing Tenure", "Working Status", 
+                             "Parent/Guardian", "Number of Children in Household")) %>%
+  # 4. ORDER THE ROWS WITHIN THE GROUPS
+  # We arrange by the group level, then by the estimate
+  # Create the factor levels for 'term' based on this specific sorted order
+  mutate(term = factor(term, levels = rev(unique(term)))) %>%
+  mutate(color = ifelse(estimate > 1, "Increase", "Decrease"))
+
+# 5. Forest plot
+ggplot(posterior_df, aes(x = term, y = estimate, color = color)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black") +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.3) +
+  geom_point(size = 3) +
+  coord_flip() +
+  scale_color_manual(values = c("Increase" = "blue", "Decrease" = "red")) +
+  labs(
+    x = "Predictors",
+    y = "Odds Ratio (95% Credible Interval)",
+    color = "Effect"
+  ) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank(),
+             legend.position = "none",
+        panel.border = element_blank(),
+    
+    # 2. Add back only the Left (Y) and Bottom (X) lines
+    axis.line = element_line(color = "black", linewidth = 0.5),
+    axis.ticks = element_blank(),        # Removes the little lines
+    #     axis.text.y = element_text(size = 10),
+    # # Increase the size of the numbers on the bottom axis
+    # axis.text.x = element_text(size = 10),
+          aspect.ratio = 1.4,
+    axis.text.y = element_text(size = 10,  color = "black"),
+    # Bold the Odds Ratio numbers (Bottom) - ONLY ONE INSTANCE HERE
+    axis.text.x = element_text(size = 10,  color = "black")
+    # Bold the Axis Titles
+    # axis.title.x = element_text(face = "bold"),
+    # axis.title.y = element_text(face = "bold")
+    )+
+  scale_x_discrete(
+  limits = rev(unname(plot_labels)),   # enforce full order including headers
+  labels = plot_labels_rev
+)
+```
+
+
+
+
+## Concerned about negative side effects
+
+
+```{r vacc_concerned-fits, fig.height=10, message=FALSE, warning=FALSE}
+
+dat_concerned$house_tenure <- fct_collapse(dat_concerned$house_tenure,
+  "Own" = c("Own outright", "Own with a mortgage", "Shared ownership scheme"),
+  "Missing" = "blank"
+)
+levels(dat_concerned$marital_status)[levels(dat_concerned$marital_status) == "blank"] <- "Missing"
+
+fit_rstanarm <- stan_glm(
+  concerned ~ Age + Gender + social_grade + ethnicity_grp +
+    marital_status + house_tenure + working_status +
+    parent_guardian + children_in_household,
+  
+  data = dat_concerned,
+  family = binomial(link = "logit"),
+      prior = normal(location = 0, scale = 1, autoscale = FALSE),
+  weights = weight,
+  
+  # prior = normal(location = 0, scale = 100, autoscale = FALSE),
+  # prior_intercept = normal(location = 0, scale = 100, autoscale = FALSE),
+  
+  chains = 4,
+  iter = 2000,
+  seed = 123
+)
+
+y_rep <- posterior_predict(fit_rstanarm)
+ppc_stat(y = dat_concerned$concerned, yrep = y_rep[1:4000, ], stat = "mean")
+
+
+predictors <- c("Age", "Gender", "social_grade", "ethnicity_grp", 
+                "marital_status", "house_tenure", "working_status", 
+                "parent_guardian", "children_in_household")
+
+eff_df_bayesian <- map_dfr(predictors, function(p) {
+  
+  # 1. Create the grid for this specific predictor
+  nd <- dat_concerned %>%
+    modelr::data_grid(!!sym(p), .model = dat_concerned)
+  
+  
+  # 2. Get the draws on the probability scale
+  post_probs <- posterior_epred(fit_rstanarm, newdata = nd, re_formula = NULL)
+  
+  # 3. Calculate the proportion of draws >= 0.5 for each level
+  # colMeans on a logical comparison gives the probability (0 to 1)
+  p_gt_50 <- colMeans(post_probs >= 0.5)
+  lower_vals <- apply(post_probs, 2, quantile, probs = 0.025)
+  upper_vals <- apply(post_probs, 2, quantile, probs = 0.975)
+  # 4. Summary statistics
+  nd %>%
+    mutate(
+      predictor = p,
+      predictor_level = as.character(!!sym(p)),
+      fit = colMeans(post_probs),
+      lower = apply(post_probs, 2, quantile, probs = 0.025),
+      upper = apply(post_probs, 2, quantile, probs = 0.975),
+      # New column: 1 if more than half the posterior mass is >= 0.5, else 0
+      # Or simply keep it as a continuous probability if you prefer
+      #above_50_threshold = ifelse(p_gt_50 >= 0.5, 1, 0) 
+      above_50_threshold = case_when(
+        p_gt_50 < 0.5                       ~ 0,
+        p_gt_50 >= 0.5 & lower_vals <= 0.5  ~ 1,
+        p_gt_50 >= 0.5 & lower_vals > 0.5   ~ 2
+      )
+    ) %>%
+    select(predictor, predictor_level, fit, lower, upper, above_50_threshold)
+})
+
+eff_df_bayesian <- eff_df_bayesian %>%
+  mutate(threshold_group = case_when(
+    above_50_threshold == 2 ~ "Above C.I. no overlap 50%",
+    above_50_threshold == 1 ~ "Above C.I. overlap 50%",
+    above_50_threshold == 0 ~ "Below C.I. overlap 50%"
+  ))
+
+
+# 1. Update your nice_names to include line breaks for the long ones
+nice_names <- c(
+  "Age" = "Age",
+  "children_in_household" = "Children\nin HH",
+  "ethnicity_grp" = "Ethnicity",
+  "Gender" = "Gender",
+  "house_tenure" = "Housing",
+  "marital_status" = "Marital\nStatus",
+  "parent_guardian" = "Parental\nStatus",
+  "social_grade" = "Social\nGrade",
+  "working_status" = "Work\nStatus"
+)
+
+# 2. Run the plot with the labeller
+ggplot(eff_df_bayesian, aes(x = predictor_level, y = fit, color = threshold_group)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "blue", linewidth = 0.8) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) +
+  
+  scale_color_manual(values = c("Above C.I. no overlap 50%" = "green", 
+                                "Above C.I. overlap 50%" = "grey", 
+                                "Below C.I. overlap 50%" = "red")) + 
+  
+  # Use the 'labeller' argument to map the raw names to your nice names
+  facet_grid(~ predictor, 
+             scales = "free_x", 
+             space = "free_x", 
+             labeller = as_labeller(nice_names)) + 
+  
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.background = element_blank(),           
+    strip.text = element_text(face = "bold", size = 11, lineheight = 0.9), 
+    panel.spacing = unit(0.5, "lines") # Increased slightly from 0 to avoid text overlap
+  ) +
+  labs(
+    y = "Probability concerned on negative side effects",
+    x = "Predictor Level",
+    color = "Probability Threshold",
+    title = "Posterior Predictive Probabilities"
+  )
+
+```
+
+```{r vacc_concerned_table, message=FALSE, warning=FALSE}
+broom::tidy(fit_rstanarm, conf.int = TRUE) |> 
+  kable(digits = 3, caption = "Logistic Regression Results") %>%
+  kable_styling(full_width = FALSE)
+
+library(rstanarm)
+library(broom.mixed)
+library(knitr)
+library(kableExtra)
+tab_latex <- broom::tidy(
+  fit_rstanarm,
+  conf.int = TRUE,
+  # conf.level = 0.95,
+  # conf.method = "quantile",
+  exponentiate = FALSE   # remove if you want log-odds
+)
+
+latex_table <- kable(
+  tab_latex,
+  format = "latex",
+  booktabs = TRUE,
+  digits = 3,
+  caption = "Bayesian Logistic Regression Results (Odds Ratios, 95\\% Credible Intervals)",
+  label = "tab:bayes_logit"
+)
+
+cat(latex_table)
+
+
+```
+
+```{r}
+
+library(tidyverse)
+library(broom.mixed)
+
+# 1. Process data with strict categorical ordering
+posterior_df <- tidy(fit_rstanarm, conf.int = TRUE, exponentiate = TRUE) %>%
+  select(term, estimate, conf.low, conf.high) %>%
+  filter(term != "(Intercept)") %>%
+  # Define the categorical order you requested
+  mutate(group_order = case_when(
+    str_detect(term, "Age") ~ 1,
+    str_detect(term, "Gender") ~ 2,
+    str_detect(term, "social_grade") ~ 3,
+    str_detect(term, "ethnicity_grp") ~ 4,
+    str_detect(term, "marital_status") ~ 5,
+    str_detect(term, "house_tenure") ~ 6,
+    str_detect(term, "working_status") ~ 7,
+    str_detect(term, "parent_guardian") ~ 8,
+    str_detect(term, "children_in_household") ~ 9,
+    TRUE ~ 10
+  )) %>%
+  # Arrange by the group order index, then by estimate within groups if desired
+  arrange(group_order, estimate) %>%
+  # Use rev() because ggplot plots factor levels from bottom to top on the y-axis
+  mutate(term_label = factor(term, levels = rev(unique(term))),
+         color = ifelse(estimate > 1, "Increase", "Decrease"))
+
+# 2. Forest plot
+ggplot(posterior_df, aes(x = term_label, y = estimate, color = color)) +
+  # Reference line at 1 for Odds Ratios
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black") +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+  geom_point(size = 3) +
+  coord_flip() +
+  scale_color_manual(values = c("Increase" = "blue", "Decrease" = "red")) +
+  labs(
+    x = "",
+    y = "Odds Ratio (95% Credible Interval)",
+    color = "Effect"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+
+```{r}
+library(tidyverse)
+library(broom.mixed)
+
+# 1. Get the raw results from rstanarm
+# Changed 'prob' to 'conf.level'
+results <- tidy(fit_rstanarm, conf.int = TRUE, exponentiate = TRUE, conf.level = 0.95) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    # Approximate p-value from Z-score (Standard for academic tables)
+    p.value = 2 * (1 - pnorm(abs(estimate / std.error))), 
+    OR = sprintf("%.2f", estimate),
+    CI = sprintf("%.2f, %.2f", conf.low, conf.high),
+    P = case_when(
+      p.value < 0.001 ~ "<0.001",
+      p.value >= 0.99 ~ ">0.99",
+      TRUE ~ sprintf("%.3f", p.value)
+    )
+  )
+
+
+clean_table <- results %>%
+  mutate(group = case_when(
+    str_detect(term, "Age") ~ "Age (ref: 18-24)",
+    str_detect(term, "Gender") ~ "Gender (ref: Female)",
+    str_detect(term, "social_grade") ~ "Social Grade (ref: High)",
+    str_detect(term, "ethnicity_grp") ~ "Ethnicity (ref: White)",
+    str_detect(term, "marital_status") ~ "Marital Status (ref: Married/ Civil Partnership)",
+    str_detect(term, "house_tenure") ~ "Housing Tenure (ref: Own)",
+    str_detect(term, "working_status") ~ "Working Status (ref: Working full-time)",
+    str_detect(term, "parent_guardian") ~ "Parent/Guardian of Child Aged (ref: 4 years and under)",
+    str_detect(term, "children_in_household") ~ "Number of Children in Household (ref: 0)",
+    TRUE ~ "Other"
+  )) %>%
+  # This regex removes the variable name prefix to leave just the level name
+  mutate(level_name = str_remove(term, "Age|Gender|social_grade|ethnicity_grp|marital_status|house_tenure|working_status|parent_guardian|children_in_household"))
+
+group_order <- c("Age (ref: 18-24)", "Gender (ref: Female)", "Social Grade (ref: High)", 
+                 "Ethnicity (ref: White)", "Marital Status (ref: Married/ Civil Partnership)", 
+                 "Housing Tenure (ref: Own)", "Working Status (ref: Working full-time)", 
+                 "Parent/Guardian of Child Aged (ref: 4 years and under)", "Number of Children in Household (ref: 0)")
+
+cat("% Copy the lines below into your LaTeX tabular environment\n")
+for(g in group_order) {
+  # Print the Header Row
+  cat(paste0(g, " &  &  &  \\\\ \n"))
+  cat("\\addlinespace[2.5pt]\n") # Adds the space you had in your template
+  
+  # Filter and print the indented sub-rows
+  sub_grp <- clean_table %>% filter(group == g)
+  
+  if(nrow(sub_grp) > 0) {
+    for(i in 1:nrow(sub_grp)) {
+      # Use quadruple backslashes to result in two backslashes in the output
+      cat(paste0("\\;\\;\\;\\;", sub_grp$level_name[i], " & ", 
+                 sub_grp$OR[i], " & ", sub_grp$CI[i], " & ", sub_grp$P[i], " \\\\ \n"))
+    }
+  }
+}
+
+```
+
+```{r}
+
+# plot_labels <- c(
+#   "25-34",
+#   "35-44",
+#   "45-54", 
+#   "≥55",
+#   "Male",
+#   "Low",
+#   "Asian",
+#   "Black",
+#   "Mixed",
+#   "Other",
+#   "Prefer not to say",
+#   "Living as married",
+#   "Never Married",
+#   "Separated/ Divorced",
+#   "Widowed",
+#   "blank",
+#   "Own with a mortgage" = "house_tenureOwn with a mortgage",
+#   "Rent-free" = "house_tenureRent-free",
+#   "Rent from a housing association",
+#   "Rent from a private landlord",
+#   "Rent from my local authority",
+#   "Family/ friends but pay rent",
+#   "Shared ownership scheme",
+#   "Other",
+#   "blank",
+#   "Working part time",
+#   "Full time student",
+#   "Not working/ Other",
+#   "Retired",
+#   "Unemployed",
+#   "5 to 11 years",
+#   "12 to 16 years",
+#   "17 to 18 years",
+#   "Over 18 years",
+#   "Not parent/ guardian",
+#   "1",
+#   "2",
+#   "≥3",
+#   "Refused"
+# )
+# 
+# plot_labels <- c(
+#   "Age (ref: 18-24)" = "header_age",
+#   "   25-34" = "Age25-34",
+#   "   35-44" = "Age35-44",
+#   "   45-54" = "Age45-54",
+#   "   ≥ 55" = "Age55+",
+#   "Gender (ref: Female)" = "header_gender",
+#   "   Male" = "GenderMale",
+#   "Social Grade (ref: High)" = "header_social",
+#   "   Low" = "social_gradeLow",
+#   "Ethnicity (ref: White)" = "header_eth",
+#   "   Asian" = "ethnicity_grpAsian",
+#   "   Black" = "ethnicity_grpBlack",
+#   "   Mixed" = "ethnicity_grpMixed",
+#   "   Other" = "ethnicity_grpOther",
+#   "   Prefer not to say" = "ethnicity_grpPrefer not to say",
+#   "Marital Status (ref: Married/ Civil Partnership)" = "header_marital",
+#   "   Living as married" = "marital_statusLiving as married",
+#   "   Never Married" = "marital_statusNever Married",
+#   "   Separated/ Divorced" = "marital_statusSeparated/ Divorced",
+#   "   Widowed" = "marital_statusWidowed",
+#   "   blank" = "marital_statusblank",
+#   "Housing Tenure (ref: Own outright)" = "header_housing",
+#   "   Own with a mortgage" = "house_tenureOwn with a mortgage",
+#   "   Rent-free" = "house_tenureRent-free",
+#   "   Rent from a housing association" = "house_tenureRent from a housing association",
+#   "   Rent from a private landlord" = "house_tenureRent from a private landlord",
+#   "   Rent from my local authority" = "house_tenureRent from my local authority",
+#   "   Family/ friends but pay rent" = "house_tenureFamily/ friends but pay rent",
+#   "   Shared ownership scheme" = "house_tenureShared ownership scheme",
+#   "   Other" = "house_tenureOther",
+#   "   blank" = "house_tenureblank",
+#   "Working Status (ref: Working full time)" = "header_work",
+#   "   Working part time" = "working_statusWorking part time",
+#   "   Full time student" = "working_statusFull time student",
+#   "   Not working/ Other" = "working_statusNot working/ Other",
+#   "   Retired" = "working_statusRetired",
+#   "   Unemployed" = "working_statusUnemployed",
+#   "Parent/Guardian of Child Aged (ref: 4 years and under)" = "header_parent",
+#   "   5 to 11 years" = "parent_guardian5 to 11 years",
+#   "   12 to 16 years" = "parent_guardian12 to 16 years",
+#   "   17 to 18 years" = "parent_guardian17 to 18 years",
+#   "   Over 18 years" = "parent_guardianOver 18 years",
+#   "   Not parent/ guardian" = "parent_guardianNot parent/ guardian",
+#   "Children in Household (ref: 0)" = "header_children",
+#   "   1" = "children_in_household1",
+#   "   2" = "children_in_household2",
+#   "   ≥ 3" = "children_in_household3+",
+#   "   Refused" = "children_in_householdRefused"
+# )
+# 
+# plot_labels_rev <- setNames(names(plot_labels), plot_labels)
+
+plot_labels <- c(
+  "25-34",
+  "35-44",
+  "45-54", 
+  "≥55",
+  "Male",
+  "Low",
+  "Asian",
+  "Black",
+  "Mixed",
+  "Other",
+  "Prefer not to say",
+  "Living as married",
+  "Never Married",
+  "Separated/ Divorced",
+  "Widowed",
+  "Missing",
+  "Rent-free" = "house_tenureRent-free",
+  "Rent from a housing association",
+  "Rent from a private landlord",
+  "Rent from my local authority",
+  "Family/ friends but pay rent",
+  "Other",
+  "Missing",
+  "Working part-time",
+  "Full-time student",
+  "Not working/ Other",
+  "Retired",
+  "Unemployed",
+  "5 to 11 years",
+  "12 to 16 years",
+  "17 to 18 years",
+  "Over 18 years",
+  "Not parent/ guardian",
+  "1",
+  "2",
+  "≥3",
+  "Refused"
+)
+
+plot_labels <- c(
+  "Age (ref: 18-24)" = "header_age",
+  "   25-34" = "Age25-34",
+  "   35-44" = "Age35-44",
+  "   45-54" = "Age45-54",
+  "   ≥ 55" = "Age55+",
+  "Gender (ref: Female)" = "header_gender",
+  "   Male" = "GenderMale",
+  "Social Grade (ref: High)" = "header_social",
+  "   Low" = "social_gradeLow",
+  "Ethnicity (ref: White)" = "header_eth",
+  "   Asian" = "ethnicity_grpAsian",
+  "   Black" = "ethnicity_grpBlack",
+  "   Mixed" = "ethnicity_grpMixed",
+  "   Other" = "ethnicity_grpOther",
+  "   Prefer not to say" = "ethnicity_grpPrefer not to say",
+  "Marital Status (ref: Married/ Civil Partnership)" = "header_marital",
+  "   Living as married" = "marital_statusLiving as married",
+  "   Never Married" = "marital_statusNever Married",
+  "   Separated/ Divorced" = "marital_statusSeparated/ Divorced",
+  "   Widowed" = "marital_statusWidowed",
+  "   Missing" = "marital_statusMissing",
+  "Housing Tenure (ref: Own)" = "header_housing",
+  "   Rent-free" = "house_tenureRent-free",
+  "   Rent from a housing association" = "house_tenureRent from a housing association",
+  "   Rent from a private landlord" = "house_tenureRent from a private landlord",
+  "   Rent from my local authority" = "house_tenureRent from my local authority",
+  "   Family/ friends but pay rent" = "house_tenureFamily/ friends but pay rent",
+  "   Other" = "house_tenureOther",
+  "   Missing" = "house_tenureMissing",
+  "Working Status (ref: Working full-time)" = "header_work",
+  "   Working part-time" = "working_statusWorking part time",
+  "   Full-time student" = "working_statusFull time student",
+  "   Not working/ Other" = "working_statusNot working/ Other",
+  "   Retired" = "working_statusRetired",
+  "   Unemployed" = "working_statusUnemployed",
+  "Parent/Guardian of Child Aged (ref: 4 years and under)" = "header_parent",
+  "   5 to 11 years" = "parent_guardian5 to 11 years",
+  "   12 to 16 years" = "parent_guardian12 to 16 years",
+  "   17 to 18 years" = "parent_guardian17 to 18 years",
+  "   Over 18 years" = "parent_guardianOver 18 years",
+  "   Not parent/ guardian" = "parent_guardianNot parent/ guardian",
+  "Number of Children in Household (ref: 0)" = "header_children",
+  "   1" = "children_in_household1",
+  "   2" = "children_in_household2",
+  "   ≥ 3" = "children_in_household3+",
+  "   Refused" = "children_in_householdRefused"
+)
+
+plot_labels_rev <- setNames(names(plot_labels), plot_labels)
+
+
+
+
+```
+
+
+
+```{r}
+
+
+library(tidyverse)
+library(broom.mixed)
+
+# 1. Tidy the model
+posterior_df <- tidy(fit_rstanarm, conf.int = TRUE, exponentiate = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(term = factor(term, levels = term)) %>%   # <-- LOCK ORDER
+  mutate(group = case_when(
+    str_detect(term, "Age") ~ "Age",
+    str_detect(term, "Gender") ~ "Gender",
+    str_detect(term, "social_grade") ~ "Social Grade",
+    str_detect(term, "ethnicity_grp") ~ "Ethnicity",
+    str_detect(term, "marital_status") ~ "Marital Status",
+    str_detect(term, "house_tenure") ~ "Housing Tenure",
+    str_detect(term, "working_status") ~ "Working Status",
+    str_detect(term, "parent_guardian") ~ "Parent/Guardian",
+    str_detect(term, "children_in_household") ~ "Number of Children in Household",
+    TRUE ~ "Other"
+  )) %>%
+  # 3. STRICTLY ORDER THE GROUPS
+  # We use fct_relevel to define the top-to-bottom order you requested
+  mutate(group = fct_relevel(group, 
+                             "Age", "Gender", "Social Grade", "Ethnicity", 
+                             "Marital Status", "Housing Tenure", "Working Status", 
+                             "Parent/Guardian", "Number of Children in Household")) %>%
+  # 4. ORDER THE ROWS WITHIN THE GROUPS
+  # We arrange by the group level, then by the estimate
+  # Create the factor levels for 'term' based on this specific sorted order
+  mutate(term = factor(term, levels = rev(unique(term)))) %>%
+  mutate(color = ifelse(estimate > 1, "Increase", "Decrease"))
+
+# 5. Forest plot
+ggplot(posterior_df, aes(x = term, y = estimate, color = color)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black") +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.3) +
+  geom_point(size = 3) +
+  coord_flip() +
+  scale_color_manual(values = c("Increase" = "blue", "Decrease" = "red")) +
+  labs(
+    x = "Predictors",
+    y = "Odds Ratio (95% Credible Interval)",
+    color = "Effect"
+  ) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank(),
+        legend.position = "none",
+        panel.border = element_blank(),
+    
+    # 2. Add back only the Left (Y) and Bottom (X) lines
+    axis.line = element_line(color = "black", linewidth = 0.5),
+    #     axis.text.y = element_text(size = 10),
+    # # Increase the size of the numbers on the bottom axis
+    # axis.text.x = element_text(size = 10),
+          aspect.ratio = 1.4,
+    axis.ticks = element_blank(),
+    axis.text.y = element_text(size = 10, color = "black"),
+    # Bold the Odds Ratio numbers (Bottom) - ONLY ONE INSTANCE HERE
+    axis.text.x = element_text(size = 10, color = "black")
+    # Bold the Axis Titles
+    # axis.title.x = element_text(face = "bold"),
+    # axis.title.y = element_text(face = "bold")
+    )+
+  scale_x_discrete(
+  limits = rev(unname(plot_labels)),   # enforce full order including headers
+  labels = plot_labels_rev
+)
+```
+
+
+
+
+<!-- ## Childhood vaccines are important for a child's health -->
+
+<!-- ```{r vacc_important-fits, fig.height=10, message=FALSE, warning=FALSE} -->
+<!-- form_full <-  -->
+<!--   "vacc_important ~ Age + Gender + social_grade + ethnicity_grp + marital_status + working_status + parent_guardian18 + children_in_household" -->
+<!--   # "vacc_important ~ Age + Gender + social_grade + ethnicity_grp + marital_status + working_status + parent_guardian + children_in_household" -->
+<!--   # "vacc_important ~ Age + Gender + social_grade + ethnicity_grp + marital_status + house_tenure + working_status + parent_guardian + children_in_household" -->
+
+<!-- fit <-  -->
+<!--   dat_vacc_imp |>  -->
+<!--   filter(marital_status != "blank") |>  -->
+<!--   glm(form_full, data = _, -->
+<!--       family = binomial(link = "logit"), -->
+<!--        weights = weight) -->
+<!-- ``` -->
+
+<!-- ```{r vacc_important_table, message=FALSE, warning=FALSE} -->
+<!-- broom::tidy(fit, conf.int = TRUE) |>  -->
+<!--   kable(digits = 3, caption = "Logistic Regression Results") %>% -->
+<!--   kable_styling(full_width = FALSE) -->
+<!-- ``` -->
+
+<!-- ```{r vacc_important-plot-effects, fig.height=10, fig.width=10, fig.path="figures/", dev="png", message=FALSE, warning=FALSE} -->
+<!-- # plot(allEffects(fit)) -->
+
+<!-- vacc_imp_list <- as.data.frame(allEffects(fit)) -->
+
+<!-- # Convert to list of data frames with a consistent column name -->
+<!-- vacc_imp_df <- -->
+<!--   purrr::map(names(vacc_imp_list), function(varname) { -->
+<!--     df <- as.data.frame(vacc_imp_list[[varname]]) -->
+<!--     colnames(df)[1] <- "predictor_level" -->
+<!--     df$predictor <- varname -->
+<!--     df -->
+<!--   }) |>  -->
+<!--   bind_rows() -->
+
+<!-- mean_predicted_prob <- mean(vacc_imp_df$fit, na.rm = TRUE) -->
+
+<!-- vacc_imp_df <- vacc_imp_df |> -->
+<!--   mutate(signif = case_when( -->
+<!--     upper < mean_predicted_prob ~ "Below", -->
+<!--     fit < mean_predicted_prob ~ "below_overlap", -->
+<!--     lower > mean_predicted_prob ~ "Above", -->
+<!--     TRUE                        ~ "Overlapping" -->
+<!--   )) -->
+
+<!-- vacc_imp_aggregate <-  -->
+<!--   vacc_imp_aggregate |>  -->
+<!--   rename(fit = p_vacc_important) -->
+
+<!-- ggplot(vacc_imp_df, aes(x = predictor_level, y = fit, color = signif)) + -->
+<!--   geom_hline(aes(yintercept = mean_predicted_prob), linetype = "dashed", color = "blue", linewidth = 1) + -->
+<!--   geom_point() + -->
+<!--   geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) + -->
+<!--   # Manually set the colors (this part is still needed to color the points) -->
+<!--   scale_color_manual(values = c("Above" = "green",  -->
+<!--                                 "Below" = "red",  -->
+<!--                                 "Overlapping" = "grey50",  -->
+<!--                                 below_overlap = "orange")) + -->
+<!--   theme_minimal() + -->
+<!--   theme(legend.position = "none", -->
+<!--         axis.text.x = element_text(angle = 45, hjust = 1)) + -->
+<!--   facet_grid(~ predictor, scales = "free_x", drop = TRUE) + -->
+<!--   ylab("Probability think childhood vaccines are important for a child's health") + -->
+<!--   # raw data aggregated values -->
+<!--   geom_point(data = vacc_imp_aggregate, color = "black", pch = 1, stroke = 1.5) -->
+<!-- ``` -->
+
+<!-- ```{r vacc_important-lor-dwplot-wave1, eval=FALSE, message=FALSE, warning=FALSE} -->
+<!-- fit |>  -->
+<!--   tidy(conf.int = TRUE) |>  -->
+<!--   dwplot() + -->
+<!--   theme_minimal() + -->
+<!--   geom_vline(xintercept = 0, linetype = "dashed") + -->
+<!--   coord_flip() + -->
+<!--   theme(legend.position = "none") + -->
+<!--   theme(axis.text.x = element_text(angle = 45, hjust = 1)) + -->
+<!--   xlab("Log-odds ratio for think childhood vaccines are important for a child's health") -->
+<!-- ``` -->
+
+<!-- ```{r vacc_important-lor-forest-plot, fig.height=10, fig.width=10, fig.path="figures/", dev="png", message=FALSE, warning=FALSE} -->
+<!-- coef_df <- tidy(fit, conf.int = TRUE) |> -->
+<!--   filter(term != "(Intercept)") # don't plot intercept -->
+
+<!-- row_vars <- c("Age", "Gender", "ethnicity_grp", "social_grade", "marital_status",  -->
+<!--               "house_tenure", "working_status", "parent_guardian", "children_in_household") -->
+
+<!-- variable_pattern <- paste(row_vars, collapse = "|") -->
+
+<!-- # split the 'term' column -->
+<!-- coef_df <- coef_df |> -->
+<!--   extract( -->
+<!--     col = term, -->
+<!--     into = c("variable", "level"), -->
+<!--     regex = paste0("(", variable_pattern, ")(.*)"), -->
+<!--     remove = FALSE  # Optional: Keep the original 'term' column -->
+<!--   ) -->
+
+<!-- coef_df <- coef_df |> -->
+<!--   mutate(significance = case_when( -->
+<!--     conf.low > 0 ~ "Positive", -->
+<!--     conf.high < 0 ~ "Negative", -->
+<!--     TRUE ~ "Not Significant" -->
+<!--   )) -->
+
+<!-- ggplot(coef_df, aes(x = level, y = estimate, color = significance)) + -->
+<!--   geom_hline(yintercept = 0, linetype = "dashed", color = "grey50", linewidth = 1) + -->
+<!--   geom_point(size = 3) + -->
+<!--   geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) + -->
+<!--   facet_grid(~variable, scales = "free_x", space = "free_x") + -->
+<!--   scale_color_manual( -->
+<!--     name = "Effect Direction", -->
+<!--     values = c( -->
+<!--       "Positive" = "#1a9641", -->
+<!--       "Negative" = "#d7191c", -->
+<!--       "Not Significant" = "grey30" -->
+<!--     ) -->
+<!--   ) + -->
+<!--   theme_minimal(base_size = 12) + -->
+<!--   theme(legend.position = "none", -->
+<!--         axis.text.x = element_text(angle = 45, hjust = 1)) + -->
+<!--   labs( -->
+<!--     x = "Category", -->
+<!--     y = "Log-odds ratio for think childhood vaccines are important for a child's health" -->
+<!--   ) -->
+<!-- ``` -->
+
+<!-- ## Heard (positive) about campaign -->
+
+<!-- ```{r campaign_hear-fits, fig.height=10, message=FALSE, warning=FALSE} -->
+<!-- form_full <-  -->
+<!--   "campaign_hear ~ Age + Gender + social_grade + ethnicity_grp + marital_status + house_tenure + working_status + parent_guardian + children_in_household" -->
+
+<!-- fit <- glm(form_full, data = dat_hear,  -->
+<!--            family = binomial(link = "logit"), -->
+<!--             weights = weight) -->
+<!-- ``` -->
+
+<!-- ```{r campaign_hear_table, message=FALSE, warning=FALSE} -->
+<!-- broom::tidy(fit, conf.int = TRUE) |>  -->
+<!--   kable(digits = 3, caption = "Logistic Regression Results") %>% -->
+<!--   kable_styling(full_width = FALSE) -->
+<!-- ``` -->
+
+<!-- ```{r campaign_hear-plot-effects, fig.height=10, fig.width=10, fig.path="figures/", dev="png", message=FALSE, warning=FALSE} -->
+<!-- hear_list <- as.data.frame(allEffects(fit)) -->
+
+<!-- # Convert to list of data frames with a consistent column name -->
+<!-- hear_df <- -->
+<!--   purrr::map(names(hear_list), function(varname) { -->
+<!--     df <- as.data.frame(hear_list[[varname]]) -->
+<!--     colnames(df)[1] <- "predictor_level" -->
+<!--     df$predictor <- varname -->
+<!--     df -->
+<!--   }) |>  -->
+<!--   bind_rows() -->
+
+<!-- mean_predicted_prob <- mean(hear_df$fit, na.rm = TRUE) -->
+
+<!-- hear_df <- hear_df |> -->
+<!--   mutate(signif = case_when( -->
+<!--     upper < mean_predicted_prob ~ "Below", -->
+<!--     fit < mean_predicted_prob ~ "below_overlap", -->
+<!--     lower > mean_predicted_prob ~ "Above", -->
+<!--     TRUE                        ~ "Overlapping" -->
+<!--   )) -->
+
+<!-- hear_aggregate <-  -->
+<!--   hear_aggregate |>  -->
+<!--   rename(fit = p_campaign_hear) -->
+
+<!-- ggplot(hear_df, aes(x = predictor_level, y = fit, color = signif)) + -->
+<!--   geom_hline(aes(yintercept = mean_predicted_prob), linetype = "dashed", color = "blue", linewidth = 1) + -->
+<!--   geom_point() + -->
+<!--   geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) + -->
+<!--   # Manually set the colors (this part is still needed to colour the points) -->
+<!--   scale_color_manual(values = c("Above" = "green",  -->
+<!--                                 "Below" = "red",  -->
+<!--                                 "Overlapping" = "grey50",  -->
+<!--                                 below_overlap = "orange")) + -->
+<!--   theme_minimal() + -->
+<!--   theme(legend.position = "none", -->
+<!--         axis.text.x = element_text(angle = 45, hjust = 1)) + -->
+<!--   facet_grid(~ predictor, scales = "free_x", drop = TRUE) + -->
+<!--   ylab("Probability heard (positive) about campaign") + -->
+<!--   # raw data aggregated values -->
+<!--   geom_point(data = hear_aggregate, color = "black", pch = 1, stroke = 1.5) -->
+<!-- ``` -->
+
+<!-- ```{r eval=FALSE, message=FALSE, warning=FALSE} -->
+<!-- fit |>  -->
+<!--   tidy(conf.int = TRUE) |>  -->
+<!--   dwplot() + -->
+<!--   theme_minimal() + -->
+<!--   geom_vline(xintercept = 0, linetype = "dashed") + -->
+<!--   coord_flip() + -->
+<!--   theme(legend.position = "none") + -->
+<!--   theme(axis.text.x = element_text(angle = 45, hjust = 1)) + -->
+<!--   xlab("Log-odds ratio for heard (positive) about campaign") -->
+<!-- ``` -->
+
+<!-- ```{r campaign_hear-lor-forest-plot, fig.height=10, fig.width=10, fig.path="figures/", dev="png", message=FALSE, warning=FALSE} -->
+<!-- coef_df <- tidy(fit, conf.int = TRUE) |> -->
+<!--   filter(term != "(Intercept)") # don't plot intercept -->
+
+<!-- row_vars <- c("Age", "Gender", "ethnicity_grp", "social_grade", "marital_status",  -->
+<!--               "house_tenure", "working_status", "parent_guardian", "children_in_household") -->
+
+<!-- variable_pattern <- paste(row_vars, collapse = "|") -->
+
+<!-- # split the 'term' column -->
+<!-- coef_df <- coef_df |> -->
+<!--   extract( -->
+<!--     col = term, -->
+<!--     into = c("variable", "level"), -->
+<!--     regex = paste0("(", variable_pattern, ")(.*)"), -->
+<!--     remove = FALSE  # Optional: Keep the original 'term' column -->
+<!--   ) -->
+
+<!-- coef_df <- coef_df |> -->
+<!--   mutate(significance = case_when( -->
+<!--     conf.low > 0 ~ "Positive", -->
+<!--     conf.high < 0 ~ "Negative", -->
+<!--     TRUE ~ "Not Significant" -->
+<!--   )) -->
+
+<!-- ggplot(coef_df, aes(x = level, y = estimate, color = significance)) + -->
+<!--   geom_hline(yintercept = 0, linetype = "dashed", color = "grey50", linewidth = 1) + -->
+<!--   geom_point(size = 3) + -->
+<!--   geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) + -->
+<!--   facet_grid(~variable, scales = "free_x", space = "free_x") + -->
+<!--   scale_color_manual( -->
+<!--     name = "Effect Direction", -->
+<!--     values = c( -->
+<!--       "Positive" = "#1a9641", -->
+<!--       "Negative" = "#d7191c", -->
+<!--       "Not Significant" = "grey30" -->
+<!--     ) -->
+<!--   ) + -->
+<!--   theme_minimal(base_size = 12) + -->
+<!--   theme(legend.position = "none", -->
+<!--         axis.text.x = element_text(angle = 45, hjust = 1)) + -->
+<!--   labs( -->
+<!--     x = "Category", -->
+<!--     y = "Log-odds ratio for heard (positive) about campaign" -->
+<!--   ) -->
+<!-- ``` -->
+
+<!-- ```{r generate-html, eval=FALSE, echo=FALSE} -->
+<!-- rmarkdown::render(here::here("scripts/analysis.Rmd"), output_format = "html_document") -->
+<!-- ``` -->
